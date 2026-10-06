@@ -1,0 +1,598 @@
+diff --git a/runner/runner.cmake b/runner/runner.cmake
+index 837c7b3..325b167 100644
+--- a/runner/runner.cmake
++++ b/runner/runner.cmake
+@@ -127,6 +127,17 @@ function(snesrecomp_target_sdl target)
+         endif()
+         message(STATUS "${target}: SDL3 desktop backend")
+     else()
++        if(NINTENDO_SWITCH)
++            # devkitPro portlibs ship SDL2 as a static library with a
++            # pkg-config file listing EGL/GL/libnx; no CMake package.
++            find_package(PkgConfig REQUIRED)
++            pkg_check_modules(SWITCH_SDL2 REQUIRED IMPORTED_TARGET sdl2)
++            target_link_libraries(${target} PRIVATE PkgConfig::SWITCH_SDL2)
++            target_compile_definitions(${target} PRIVATE
++                SNESRECOMP_SDL3=0 SDL_MAIN_HANDLED)
++            message(STATUS "${target}: SDL2 (Nintendo Switch portlibs)")
++            return()
++        endif()
+         find_package(SDL2 REQUIRED)
+         target_compile_definitions(${target} PRIVATE
+             SNESRECOMP_SDL3=0
+@@ -1198,7 +1209,7 @@ function(snesrecomp_target_desktop_host target)
+     else()
+         snesrecomp_target_post_mortem(${target})
+     endif()
+-    if(NOT ANDROID)
++    if(NOT ANDROID AND NOT NINTENDO_SWITCH)
+         snesrecomp_target_opengl(${target})
+     endif()
+     # Run-ahead and rewind are the host's (snes_runahead.c, snes_rewind.c,
+diff --git a/runner/src/common_rtl.c b/runner/src/common_rtl.c
+index 257c951..022daa9 100644
+--- a/runner/src/common_rtl.c
++++ b/runner/src/common_rtl.c
+@@ -2292,6 +2292,14 @@ void RtlSetAudioOutputRate(int freq) {
+     s_render_output_rate = (double)freq;
+ }
+ 
++/* The same, at sub-Hz precision, for a host that paces the guest off the
++ * display and resamples to match (desktop/host_main.c, Switch vsync pacing).
++ * Callers after audio start must hold RtlApuLock. */
++void RtlSetAudioOutputRateHz(double freq) {
++  if (freq >= 8000 && freq <= 192000)
++    s_render_output_rate = freq;
++}
++
+ /* Accessor for other consumers that must resample onto the same device rate
+  * as rtl_render_native (e.g. msu1_mix's 44.1 kHz track -> device-rate
+  * conversion in snes/msu1.c). Declared extern locally there rather than
+diff --git a/runner/src/common_rtl.h b/runner/src/common_rtl.h
+index 1b13e0c..20af77c 100644
+--- a/runner/src/common_rtl.h
++++ b/runner/src/common_rtl.h
+@@ -298,6 +298,7 @@ void RtlRenderAudio(int16 *audio_buffer, int samples, int channels);
+  * omitting it silently assumes 32040 and consumes far too fast at any other
+  * rate. Ignored for values outside 8000-192000. */
+ void RtlSetAudioOutputRate(int freq);
++void RtlSetAudioOutputRateHz(double freq);
+ /* Notify the shared audio runner of host fast-forward state. Guest-frame SPC
+  * synchronization is automatic inside RtlRunFrame; clients only supply the
+  * presentation policy needed to discard stale PCM after fast-forward. */
+diff --git a/runner/src/desktop/fiber_compat.c b/runner/src/desktop/fiber_compat.c
+index d1f6893..65d426b 100644
+--- a/runner/src/desktop/fiber_compat.c
++++ b/runner/src/desktop/fiber_compat.c
+@@ -17,8 +17,9 @@
+  * cannot inherit a fix (recomp-ai-rules/PRINCIPLES.md).
+  */
+ #ifndef _WIN32
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(__SWITCH__) || defined(SNESRECOMP_FIBER_PTHREAD)
+ 
++/* Switch: newlib/libnx has no ucontext at all; libnx threads back pthreads. */
+ #include "fiber_compat.h"
+ #include <pthread.h>
+ #include <stdlib.h>
+diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
+index e1d9b54..04ba5a0 100644
+--- a/runner/src/desktop/host_main.c
++++ b/runner/src/desktop/host_main.c
+@@ -21,6 +21,9 @@
+ 
+ #include "debug_server.h"
+ #include "desktop/sdl_compat.h"
++#if defined(__SWITCH__)
++#include <switch.h>
++#endif
+ #ifdef _WIN32
+ #include <windows.h>
+ #include <direct.h>
+@@ -164,7 +167,7 @@ static void HandleInput(int keyCode, int keyMod, bool pressed);
+ static void HandleCommand(uint32 j, bool pressed);
+ static void PollKeyboardControls(const uint8_t *keys);
+ static void RequestScreenshot(void);
+-#ifndef __ANDROID__
++#if !defined(__ANDROID__) && !defined(__SWITCH__)
+ void OpenGLRenderer_Create(struct RendererFuncs *funcs);
+ #include "opengl.h"   /* snesrecomp_opengl_set_vsync */
+ #endif
+@@ -482,7 +485,7 @@ static void RendererEnumerate(void) {
+   snprintf(g_renderer_id[0], kRendererNameMax, "auto");
+   snprintf(g_renderer_label[0], kRendererNameMax, "Auto");
+   g_renderer_count = 1;
+-#ifndef __ANDROID__
++#if !defined(__ANDROID__) && !defined(__SWITCH__)
+   snprintf(g_renderer_id[1], kRendererNameMax, "opengl");
+   snprintf(g_renderer_label[1], kRendererNameMax, "OpenGL");
+   g_renderer_count = 2;
+@@ -1971,9 +1974,16 @@ static _Thread_local unsigned g_apu_lock_depth;
+ static _Thread_local bool g_audio_consumer_stalled;
+ static _Thread_local uint64_t g_audio_stalled_callback;
+ static uint64_t g_audio_callback_count;  /* protected by g_audio_mutex */
++static double g_audio_throttle_seconds;  /* guest time spent waiting on the device */
+ static bool g_audio_primed;  /* protected by g_audio_mutex */
+ #define HOST_AUDIO_PREFILL 2136u
+-#define HOST_AUDIO_HIGH_WATER 4096u
++/* The producer waits for the device above this many native frames. It must
++ * clear the prefill plus a whole device callback with room to spare: with a
++ * 2048-sample callback (64 ms) the ring has to swing past a fixed 4096 every
++ * period, so the guest thread blocked until the next callback -- up to 64 ms
++ * -- several times a second. Set from the opened device's period. */
++static uint32_t g_audio_high_water = 4096u;
++#define HOST_AUDIO_HIGH_WATER g_audio_high_water
+ #if SNESRECOMP_SDL3
+ /* SDL3 replaced the pull callback with an SDL_AudioStream the app pushes into,
+  * so the mixer needs a scratch buffer sized to whatever the stream asks for. */
+@@ -2012,6 +2022,7 @@ void RtlApuUnlock(void) {
+      * Let the device drain it before the bounded ring overflows. Always
+      * release the mutex while waiting, and stop waiting if the device stalls. */
+     double limit = MonotonicSeconds() + 0.25;
++    const double throttle_start = MonotonicSeconds();
+     while (dsp_available(g_snes->apu->dsp) > HOST_AUDIO_HIGH_WATER) {
+       SDL_UnlockMutex(g_audio_mutex);
+       SDL_Delay(1);
+@@ -2025,6 +2036,7 @@ void RtlApuUnlock(void) {
+         break;
+       }
+     }
++    g_audio_throttle_seconds += MonotonicSeconds() - throttle_start;
+   }
+   SDL_UnlockMutex(g_audio_mutex);
+ }
+@@ -2383,6 +2395,128 @@ static int FindRomBesideExe(char *out, size_t cap) {
+   return 0;
+ }
+ 
++#if defined(__SWITCH__)
++/* Vsync-paced presentation. The panel refreshes at 60 Hz and the SNES runs at
++ * 60.0988 Hz; pacing with a timer at the SNES rate *and* waiting for vsync made
++ * the two clocks beat: every ~43 frames the timer's wake-up (1 ms sleep
++ * granularity) landed past a vblank and that frame took an extra refresh. Here
++ * vsync alone paces the guest, one frame per refresh, and audio is resampled
++ * by the same 0.16% (~3 cents) so the sample queue stays level. If vsync stops
++ * blocking (frames arrive far faster than the panel), the timer takes over. */
++static bool g_vsync_paced;
++static int g_vsync_device_rate;   /* the opened device rate, for restoring */
++static double g_vsync_refresh = 60;
++
++static void SwitchVsyncConfigure(void) {
++  double refresh = DisplayRefresh();
++  if (!(refresh >= 50 && refresh <= 70)) refresh = 60;
++  g_vsync_refresh = refresh;
++  g_vsync_paced = VSyncInterval() == 1 && !PresentationDecoupled() &&
++      (g_simulation_hz > refresh ? g_simulation_hz - refresh : refresh - g_simulation_hz) <
++          0.01 * g_simulation_hz;
++  host_report_breadcrumb("pacing: %s (refresh=%.3f simulation=%.4f)",
++                         g_vsync_paced ? "vsync" : "timer", refresh, g_simulation_hz);
++}
++static void SwitchVsyncApplyAudioRate(void) {
++  if (g_vsync_device_rate <= 0) return;
++  const double rate = g_vsync_paced
++      ? g_vsync_device_rate * g_simulation_hz / g_vsync_refresh
++      : (double)g_vsync_device_rate;
++  if (g_audio_mutex) RtlApuLock();
++  RtlSetAudioOutputRateHz(rate);
++  if (g_audio_mutex) RtlApuUnlock();
++  host_report_breadcrumb("audio: resampling to %.2f Hz for %s pacing", rate,
++                         g_vsync_paced ? "vsync" : "timer");
++}
++/* Per presented frame: fall back to the timer if vsync is not holding the
++ * loop to the panel (or the player turned it off in the launcher). */
++static void SwitchVsyncGuard(void) {
++  static double last;
++  static unsigned fast;
++  if (!g_vsync_paced) { last = 0; return; }
++  const double now = MonotonicSeconds();
++  if (VSyncInterval() != 1) fast = 1000;
++  else if (last > 0 && now - last < 0.6 / g_vsync_refresh) ++fast;
++  else fast = 0;
++  last = now;
++  if (fast >= 30) {
++    g_vsync_paced = false;
++    SwitchVsyncApplyAudioRate();
++    host_report_breadcrumb("pacing: vsync is not limiting presentation; using the timer");
++    fast = 0;
++  }
++}
++#endif
++
++#if defined(__SWITCH__)
++/* A [perf] line every 600 frames (~10 s): there is no profiler or terminal on
++ * the console, so the log is how a slowdown is diagnosed. Stage times are
++ * means per simulated frame. "dropped" counts panel refreshes that passed
++ * without a new frame -- what a player sees as a stutter. A single slow loop
++ * iteration is not one: the GPU queue absorbs it. Only when refreshes were
++ * dropped does a second line break down the window's slowest iteration. */
++static void SwitchPerfTick(unsigned frame, uint64_t presentations) {
++  static double last_at, prev_iter, worst;
++  static unsigned last_frame, worst_frame;
++  static uint64_t last_presentations;
++  static double last_total[kProfileCount], last_throttle;
++  static double iter_total[kProfileCount], worst_stage[kProfileCount];
++  static double paused;
++  static unsigned pauses;
++  const double now = MonotonicSeconds();
++  /* Menus, rewind and loads hold the loop for a long stretch; that is not a
++   * stutter, so it leaves the window and is counted on its own. */
++  if (prev_iter > 0 && now - prev_iter > 0.25) {
++    paused += now - prev_iter;
++    ++pauses;
++  } else if (prev_iter > 0 && now - prev_iter > worst) {
++    worst = now - prev_iter;
++    worst_frame = frame;
++    for (unsigned i = 0; i < kProfileCount; ++i)
++      worst_stage[i] = g_timings[i].total - iter_total[i];
++  }
++  prev_iter = now;
++  for (unsigned i = 0; i < kProfileCount; ++i) iter_total[i] = g_timings[i].total;
++  if (frame % 600 != 0) return;
++  if (last_at > 0 && frame > last_frame) {
++    const double n = (double)(frame - last_frame), span = now - last_at - paused;
++    const double presented = (double)(presentations - last_presentations);
++    const double refreshes = span * g_vsync_refresh;
++    const unsigned dropped = refreshes - presented > 0.5
++        ? (unsigned)(refreshes - presented + 0.5) : 0;
++    double ms[kProfileCount];
++    for (unsigned i = 0; i < kProfileCount; ++i)
++      ms[i] = (g_timings[i].total - last_total[i]) * 1000.0 / n;
++    /* fprintf, not host_report_breadcrumb: the breadcrumb clips long lines.
++     * Flushed (below) once per window: without it a game closed from HOME
++     * lost every line still sitting in the stdio buffer. */
++    fprintf(stderr,
++        "[perf] frame=%u fps=%.1f dropped=%u | guest=%.2f raster=%.2f compose=%.2f "
++        "present=%.2f wait=%.2f audio_wait=%.2f ms/frame | %s pauses=%u\n",
++        frame, presented / span, dropped, ms[kProfileGuest], ms[kProfileRaster],
++        ms[kProfileCompose], ms[kProfilePresent], ms[kProfileWait],
++        (g_audio_throttle_seconds - last_throttle) * 1000.0 / n,
++        g_vsync_paced ? "vsync" : "timer", pauses);
++    if (dropped)
++      fprintf(stderr,
++          "[perf]   slowest frame=%u %.1fms: guest=%.2f raster=%.2f compose=%.2f "
++          "present=%.2f wait=%.2f ms\n",
++          worst_frame, worst * 1000.0, worst_stage[kProfileGuest] * 1000.0,
++          worst_stage[kProfileRaster] * 1000.0, worst_stage[kProfileCompose] * 1000.0,
++          worst_stage[kProfilePresent] * 1000.0, worst_stage[kProfileWait] * 1000.0);
++    fflush(stderr);
++  }
++  last_at = now;
++  last_frame = frame;
++  last_presentations = presentations;
++  last_throttle = g_audio_throttle_seconds;
++  for (unsigned i = 0; i < kProfileCount; ++i) last_total[i] = g_timings[i].total;
++  worst = 0;
++  paused = 0;
++  pauses = 0;
++}
++#endif
++
+ /* ── main ─────────────────────────────────────────────────────────────────── */
+ 
+ /* ── The launcher, before boot and mid-game ──────────────────────────────── */
+@@ -2537,10 +2671,16 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
+    * row that does nothing is worse than no row. */
+ #if defined(SNESRECOMP_HOST_HAS_BLEND)
+   gi->has_frame_blend  = 1;
++#endif
++#if defined(__SWITCH__)
++  /* SDL_Renderer only: no GLSL presets to pick (see snesrecomp_target_opengl). */
++  const int shader_row = 0;
++#else
++  const int shader_row = game->shader_supported;
+ #endif
+   SnesLauncherVideo_Configure(ls, gi,
+       game->display_aspect_supported && !game->aspect_labels,
+-      game->shader_supported, g_config.display_aspect, g_config.shader);
++      shader_row, g_config.display_aspect, g_config.shader);
+   if (game->aspect_labels && game->num_aspect_labels > 0) {
+     /* A port that rasterizes its own field owns the choices and the
+      * meaning of the index; this host only carries them to the row. */
+@@ -2556,7 +2696,11 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
+   gi->has_rewind_depth = game->rewind_settings ? 1 : 0;
+   gi->has_run_ahead    = 1;   /* the runtime snapshots a machine in a frame */
+   gi->has_vsync        = 1;
++#if defined(__SWITCH__)
++  gi->has_renderer     = 0;   /* one presenter: SDL_Renderer on GLES */
++#else
+   gi->has_renderer     = 1;
++#endif
+   RendererEnumerate();
+   gi->renderer_labels  = g_renderer_label_ptr;
+   gi->num_renderers    = g_renderer_count;
+@@ -2673,7 +2817,7 @@ static void ApplyLiveSettings(const Config *before) {
+       g_current_window_scale = IntMin(g_config.window_scale, kMaxWindowScale);
+     ChangeWindowScale(0);
+   }
+-#ifndef __ANDROID__
++#if !defined(__ANDROID__) && !defined(__SWITCH__)
+   snesrecomp_opengl_set_vsync(VSyncInterval());
+ #endif
+   if (g_renderer_funcs.Reconfigure) g_renderer_funcs.Reconfigure();
+@@ -2744,6 +2888,22 @@ static void RunInGameLauncher(bool *running, const char **exit_reason) {
+ #if !defined(RECOMP_LAUNCHER)
+   (void)running; (void)exit_reason;
+   host_report_breadcrumb("in-game launcher: this build has no launcher");
++#elif defined(__SWITCH__)
++  /* Switch SDL has exactly one window, and it is the game's. Save this
++   * moment, then let the loader start the NRO again into the launcher; its
++   * PLAY resumes from the saved state, with whatever the player changed. */
++  snprintf(g_relaunch.rom, sizeof(g_relaunch.rom), "%s", g_rom_path);
++  g_relaunch.with_state =
++      !g_netplay_session &&
++      snesrecomp_abspath("saves/resume.sav", g_relaunch.state,
++                         sizeof(g_relaunch.state)) &&
++      RtlSaveSnapshot(g_relaunch.state);
++  g_relaunch.launcher = true;
++  g_relaunch.pending = true;
++  *running = false;
++  *exit_reason = "in-game launcher: restarting into the launcher";
++  host_report_breadcrumb("in-game launcher: restarting into the launcher%s",
++                         g_relaunch.with_state ? " (resume state saved)" : "");
+ #else
+   host_report_breadcrumb("in-game launcher OPEN - guest frozen until RESUME "
+                          "(or closing the launcher window)");
+@@ -2868,7 +3028,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
+   g_simulation_hz = game->simulation_hz > 0 ? game->simulation_hz : SNES_HOST_NTSC_HZ;
+   g_snes_width = game->frame_width > 0 ? game->frame_width : 256;
+   g_snes_height = game->frame_height > 0 ? game->frame_height : 224;
+-#ifndef __ANDROID__
++#if !defined(__ANDROID__) && !defined(__SWITCH__)
+   snesrecomp_opengl_set_viewport(game->compute_viewport);
+ #endif
+   const char *build_version = game->build_version ? game->build_version : "dev";
+@@ -3308,7 +3468,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
+       g_current_window_scale * WindowBaseHeight();
+ 
+   RendererApply(RendererChoice());
+-#ifndef __ANDROID__
++#if !defined(__ANDROID__) && !defined(__SWITCH__)
+   if (g_config.output_method == kOutputMethod_OpenGL) {
+     g_win_flags |= SDL_WINDOW_OPENGL;
+     snesrecomp_opengl_set_vsync(VSyncInterval());
+@@ -3418,6 +3578,12 @@ error_reading:;
+   }
+ #endif
+ 
++#if defined(__SWITCH__)
++  /* One fixed full-screen layer; SDL scales it to 1080p when docked. */
++  window_width = 1280;
++  window_height = 720;
++  g_win_flags |= SDL_WINDOW_FULLSCREEN;
++#endif
+   /* SDL3 dropped the x/y arguments from SDL_CreateWindow. */
+   SDL_Window *window = snesrecomp_sdl_create_window(
+       g_window_title, window_width, window_height, g_win_flags);
+@@ -3439,6 +3605,9 @@ error_reading:;
+   host_report_breadcrumb("renderer initialized: %s",
+       g_config.output_method == kOutputMethod_OpenGL ? "opengl" :
+       g_config.output_method == kOutputMethod_SDLSoftware ? "sdl-software" : "sdl");
++#if defined(__SWITCH__)
++  SwitchVsyncConfigure();
++#endif
+ 
+   g_audio_mutex = SDL_CreateMutex();
+   if (!g_audio_mutex) Die("No mutex");
+@@ -3501,18 +3670,36 @@ error_reading:;
+     /* The SPC's native rate is 32040 Hz (1.024 MHz / 32), not 32000. The
+      * consumer converts onto the device rate and cannot infer it. */
+     RtlSetAudioOutputRate(have.freq);
++#if defined(__SWITCH__)
++    g_vsync_device_rate = have.freq;
++    SwitchVsyncApplyAudioRate();
++#endif
+     audio_output_rate = have.freq;
+     g_frames_per_block = (534 * have.freq + 32040 / 2) / 32040;
++    {
++#if SNESRECOMP_SDL3
++      const uint32_t period = (uint32_t)g_config.audio_samples;
++#else
++      const uint32_t period = have.samples;
++#endif
++      const uint32_t native = have.freq > 0
++          ? (uint32_t)(((uint64_t)period * 32040u + (uint32_t)have.freq - 1) / (uint32_t)have.freq)
++          : period;
++      const uint32_t need = HOST_AUDIO_PREFILL + 2u * native;
++      /* Never past what the DSP ring holds, less a frame of overshoot. */
++      const uint32_t cap = DSP_SAMPLE_RING - 1024u;
++      g_audio_high_water = need > 4096u ? (need < cap ? need : cap) : 4096u;
++    }
+     g_audiobuffer = (uint8 *)calloc(g_frames_per_block * have.channels * sizeof(int16), 1);
+     host_report_breadcrumb(
+-        "audio device opened: freq=%d (want %d) ch=%d samples=%d frames_per_block=%d",
++        "audio device opened: freq=%d (want %d) ch=%d samples=%d frames_per_block=%d high_water=%u",
+         have.freq, want.freq, have.channels,
+ #if SNESRECOMP_SDL3
+         g_config.audio_samples,
+ #else
+         have.samples,
+ #endif
+-        g_frames_per_block);
++        g_frames_per_block, (unsigned)g_audio_high_water);
+   } else {
+     host_report_breadcrumb("audio disabled in config");
+   }
+@@ -3568,6 +3755,9 @@ error_reading:;
+   if (frame_timing_path) g_frame_timings = calloc(kFrameTimingCapacity, sizeof(*g_frame_timings));
+   bool profile_requested = g_frame_timings ||
+       (HostGetenv("HOST_PROFILE") && atoi(HostGetenv("HOST_PROFILE")) != 0);
++#if defined(__SWITCH__)
++  profile_requested = true;   /* feeds SwitchPerfTick's [perf] lines */
++#endif
+   unsigned profile_first = HostGetenv("HOST_PROFILE_START_FRAME")
+       ? (unsigned)strtoul(HostGetenv("HOST_PROFILE_START_FRAME"), NULL, 10) : 1;
+   if (!profile_first) profile_first = 1;
+@@ -3612,6 +3802,14 @@ error_reading:;
+     host_report_crash_test_tick();
+ 
+     double event_profile_start = ProfileStart();
++#if defined(__SWITCH__)
++    /* HOME-menu "close" and system shutdown arrive through the applet. */
++    if (!appletMainLoop()) {
++      running = false;
++      exit_reason = "the system asked the application to exit";
++      break;
++    }
++#endif
+     while (SDL_PollEvent(&event)) {
+       if (HandleDeviceEvent(&event))
+         continue;
+@@ -3792,7 +3990,11 @@ error_reading:;
+       snes_host_clock_reset(&video_clock, video_now, g_simulation_hz, presentation_hz);
+       g_reset_clock = false;
+     }
+-    if (paced_realtime && !snes_host_clock_simulation_due(&video_clock, MonotonicSeconds())) {
++    bool timer_paced = paced_realtime;
++#if defined(__SWITCH__)
++    if (g_vsync_paced && !paced_custom) timer_paced = false;   /* vsync paces */
++#endif
++    if (timer_paced && !snes_host_clock_simulation_due(&video_clock, MonotonicSeconds())) {
+       if (snes_host_clock_presentation_due(&video_clock, MonotonicSeconds())) {
+         if (paced_custom) {
+           double presented_at = MonotonicSeconds();
+@@ -4052,6 +4254,10 @@ error_reading:;
+       running = false;
+       exit_reason = "RUN_FRAMES reached";
+     }
++#if defined(__SWITCH__)
++    SwitchVsyncGuard();
++    SwitchPerfTick(frameCtr, presentations);
++#endif
+   }
+ 
+   const double run_end = MonotonicSeconds();
+@@ -4283,7 +4489,7 @@ static void RequestScreenshot(void) {
+     return;
+   s_last_screenshot_time = now;
+ 
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(__SWITCH__)
+   fprintf(stderr, "Screenshots require the desktop OpenGL backend.\n");
+ #else
+   if (g_config.output_method != kOutputMethod_OpenGL) {
+diff --git a/runner/src/desktop/host_relaunch.c b/runner/src/desktop/host_relaunch.c
+index 56e3aaf..9c1a768 100644
+--- a/runner/src/desktop/host_relaunch.c
++++ b/runner/src/desktop/host_relaunch.c
+@@ -13,6 +13,8 @@
+ #if defined(_WIN32)
+ #  define WIN32_LEAN_AND_MEAN
+ #  include <windows.h>
++#elif defined(__SWITCH__)
++#  include <switch.h>
+ #elif !defined(__ANDROID__)
+ #  include <spawn.h>
+ extern char **environ;
+@@ -49,7 +51,36 @@ static int AppendQuoted(char *out, size_t cap, size_t *len, const char *arg) {
+ #endif
+ 
+ int snesrecomp_host_relaunch(int argc, const char *const *args) {
+-#if defined(__ANDROID__)
++#if defined(__SWITCH__)
++  /* No processes to spawn: ask the homebrew loader to start this NRO again,
++   * with these arguments, once the current run returns from main(). */
++  char exe[1024];
++  if (!snesrecomp_exe_path(exe, sizeof(exe))) return 0;
++  if (!envHasNextLoad()) {
++    fprintf(stderr, "[relaunch] this loader cannot chain-load an NRO\n");
++    return 0;
++  }
++  char nro[1100];
++  snprintf(nro, sizeof(nro), "%s%s", exe[0] == '/' ? "sdmc:" : "", exe);
++  /* libnx splits the argument string on spaces and honours double quotes. */
++  char cmdline[4096];
++  size_t len = 0;
++  int ok = 1;
++  for (int i = -1; i < argc && ok; ++i) {
++    const char *a = i < 0 ? nro : args[i];
++    if (!a) { ok = 0; break; }
++    int n = snprintf(cmdline + len, sizeof(cmdline) - len, "%s\"%s\"",
++                     len ? " " : "", a);
++    if (n < 0 || (size_t)n >= sizeof(cmdline) - len) ok = 0;
++    else len += (size_t)n;
++  }
++  if (!ok) return 0;
++  if (R_FAILED(envSetNextLoad(nro, cmdline))) {
++    fprintf(stderr, "[relaunch] envSetNextLoad(%s) failed\n", nro);
++    return 0;
++  }
++  return 1;
++#elif defined(__ANDROID__)
+   /* An app is started by the system, not by itself (and posix_spawn needs
+    * API 28). The in-game launcher's restart is desktop-only. */
+   (void)argc; (void)args;
+diff --git a/runner/src/host_paths.c b/runner/src/host_paths.c
+index 216a8ff..a5c7a85 100644
+--- a/runner/src/host_paths.c
++++ b/runner/src/host_paths.c
+@@ -51,6 +51,13 @@ static int get_exe_path(char *out, size_t max_len) {
+     if (n <= 0) return 0;
+     out[n] = '\0';
+     return 1;
++#elif defined(__SWITCH__)
++    /* The homebrew loader's NRO path, captured by the Switch entry shim. */
++    extern const char *snesrecomp_switch_exe_path(void);
++    const char *nro = snesrecomp_switch_exe_path();
++    if (!nro || !nro[0] || strlen(nro) >= max_len) return 0;
++    memcpy(out, nro, strlen(nro) + 1);
++    return 1;
+ #else
+     (void)out;
+     (void)max_len;
+@@ -84,14 +91,28 @@ int snesrecomp_abspath(const char *path, char *out, size_t max_len) {
+     strcpy(out, tmp);
+     return 1;
+ #else
+-    if (path[0] == '/') {
++    int absolute = path[0] == '/';
++#if defined(__SWITCH__)
++    /* Horizon spells absolute paths with a device ("sdmc:/", "romfs:/"). */
++    const char *colon = strchr(path, ':');
++    const char *slash = strchr(path, '/');
++    if (colon && colon[1] == '/' && (!slash || colon < slash)) absolute = 1;
++#endif
++    if (absolute) {
+         if (strlen(path) >= max_len) return 0;
+         strcpy(out, path);
+         return 1;
+     }
+     char cwd[1024];
+     if (!snesrecomp_getcwd(cwd, sizeof(cwd))) return 0;
+-    if (snprintf(out, max_len, "%s/%s", cwd, path) >= (int)max_len) return 0;
++    const char *base = cwd;
++    size_t blen = strlen(base);
++    if (blen && base[blen - 1] == '/') cwd[--blen] = '\0';
++#if defined(__SWITCH__)
++    /* libnx reports cwd as "sdmc:/..."; keep the host's '/'-rooted form. */
++    if (!strncmp(base, "sdmc:/", 6)) base += 5;
++#endif
++    if (snprintf(out, max_len, "%s/%s", base, path) >= (int)max_len) return 0;
+     return 1;
+ #endif
+ }
+diff --git a/runner/src/launcher_picker.c b/runner/src/launcher_picker.c
+index 720b16f..47f922e 100644
+--- a/runner/src/launcher_picker.c
++++ b/runner/src/launcher_picker.c
+@@ -12,7 +12,7 @@
+ #  endif
+ #endif
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__SWITCH__)
+ /* Run one shell-wrapped native chooser and read its selected path. */
+ static int run_picker_cmd(const char *cmd, char *out, size_t max_len) {
+     FILE *p = popen(cmd, "r");
+@@ -48,6 +48,12 @@ int snesrecomp_pick_rom_file(char *out, size_t max_len) {
+     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY |
+                 OFN_NOCHANGEDIR;
+     return GetOpenFileNameA(&ofn) ? 1 : 0;
++#elif defined(__SWITCH__)
++    /* No shell or native chooser on the console; the entry shim already
++     * searched the NRO's folder before the host got here. */
++    out[0] = '\0';
++    fprintf(stderr, "[Launcher] No matching ROM found beside the NRO.\n");
++    return 0;
+ #else
+     out[0] = '\0';
+     static const char *const pickers[] = {

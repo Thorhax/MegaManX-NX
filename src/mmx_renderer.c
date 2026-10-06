@@ -15,6 +15,10 @@ typedef struct Raster {
   uint8_t registers[PPU_SAVESTATE_REGS_SIZE];
   uint16_t palette[256], oam[256], vram[0x8000];
   uint8_t high_oam[32];
+  /* VRAM is copied only on the lines where the PPU wrote it since the line
+   * before (almost never mid-frame): every other line reads the copy held by
+   * frame.lines[vram_line]. -1 means this raster owns `vram` outright. */
+  int16_t vram_line;
 } Raster;
 typedef struct Piece {
   int16_t x, y; uint16_t attr; uint8_t size, animation;
@@ -51,6 +55,9 @@ static int view_camera(const uint8_t *r,unsigned address) {
 void MmxRendererHoldFrame(bool held) {frame_held=held;}
 static uint8_t partner_ram[0x20000];
 static Raster partner_raster;
+static inline const uint16_t *raster_vram(const Raster *r) {
+  return r->vram_line < 0 ? r->vram : frame.lines[r->vram_line].vram;
+}
 static Piece building[MAX_PIECES], latched[MAX_PIECES];
 static unsigned building_count, latched_count;
 static uint8_t building_stage, latched_stage;
@@ -61,6 +68,12 @@ static bool observed_lists;
 static const uint8_t *rom;
 static size_t rom_size;
 static MmxRenderStats stats;
+#if defined(__SWITCH__) || defined(__linux__)
+static _Thread_local MmxRenderStats s_row_stats;
+#define ROW_STATS s_row_stats
+#else
+#define ROW_STATS stats
+#endif
 static uint8_t door_cache[512 * 512];
 static int airport_sky_width;
 typedef struct SubmarineBody {
@@ -372,7 +385,16 @@ void MmxRendererCaptureLine(const Ppu *p, unsigned line) {
   memcpy(r->palette, p->cgram, sizeof(r->palette));
   memcpy(r->oam, p->oam, sizeof(r->oam));
   memcpy(r->high_oam, p->highOam, sizeof(r->high_oam));
-  memcpy(r->vram, p->vram, sizeof(r->vram));
+  /* Copying 64 KiB of VRAM for every one of 224 lines was ~15 MB of memcpy a
+   * frame -- the largest cost of the custom renderer on a Switch. */
+  static uint32_t s_vram_writes;
+  if (line == 1 || p->vramWriteCount != s_vram_writes) {
+    memcpy(r->vram, p->vram, sizeof(r->vram));
+    r->vram_line = (int16_t)(line - 1);
+    s_vram_writes = p->vramWriteCount;
+  } else {
+    r->vram_line = frame.lines[line - 2].vram_line;
+  }
   ++frame.captured;
 }
 bool MmxRendererEndFrame(const uint32_t stock[256 * 224]) {
@@ -504,18 +526,22 @@ bool MmxRendererStageTile(const uint8_t ram[0x20000], unsigned layer,
 static bool door_body(int x, int y) {
   if (x < 0 || y < 0 || x >= 8192 || y >= 8192) return false;
   unsigned key = (y >> 4) * 512 + (x >> 4);
-  if (door_cache[key]) return door_cache[key] == 2;
-  door_cache[key] = 1;
+  /* Rows run on several threads: an entry is written once, with its final
+   * answer (1 = no door, 2 = door), so a reader sees either 0 or the result. */
+  uint8_t known = __atomic_load_n(&door_cache[key], __ATOMIC_RELAXED);
+  if (known) return known == 2;
   x &= ~15; y &= ~15;
-  for (int row = 0; row < 3; ++row) {
+  bool door = false;
+  for (int row = 0; row < 3 && !door; ++row) {
     uint16_t entries[3][4];
     bool valid = true;
     for (int r = 0; r < 3; ++r) for (int q = 0; q < 4; ++q)
       valid &= MmxRendererStageTile(frame.ram, 0, x + (q & 1) * 8,
                                      y + (r - row) * 16 + (q >> 1) * 8, &entries[r][q]);
-    if (valid && MmxWidePolicy_IsBossDoorBody(entries, row)) { door_cache[key] = 2; return true; }
+    if (valid && MmxWidePolicy_IsBossDoorBody(entries, row)) door = true;
   }
-  return false;
+  __atomic_store_n(&door_cache[key], (uint8_t)(door ? 2 : 1), __ATOMIC_RELAXED);
+  return door;
 }
 static unsigned tile_pixel(const uint16_t *vram, unsigned address, int x, int y, unsigned bpp) {
   unsigned a = (address + y) & 0x7fff, shift = 7 - x;
@@ -624,7 +650,7 @@ static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x,
   unsigned a = (sc & 0xfc) * 256 + (tx & 31) + (ty & 31) * 32;
   if ((sc & 1) && (tx & 32)) a += 1024;
   if ((sc & 2) && (ty & 32)) a += (sc & 1) ? 2048 : 1024;
-  uint16_t tile = r->vram[a & 0x7fff];
+  uint16_t tile = raster_vram(r)[a & 0x7fff];
   if (layer == 0 && !stage) {
     int icon = weapon_menu_icon(x, y);
     if (icon >= 0) { *private_color = icon; return 0x8001; }
@@ -756,7 +782,7 @@ static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x,
     unsigned shift = 7 - (cx & 7);
     pixel = ((bits[0] >> shift) & 1) | (((bits[1] >> shift) & 1) << 1) |
         (((bits[16] >> shift) & 1) << 2) | (((bits[17] >> shift) & 1) << 3);
-  } else pixel = tile_pixel(r->vram, address, cx & 7, cy & 7, bpp);
+  } else pixel = tile_pixel(raster_vram(r), address, cx & 7, cy & 7, bpp);
   if (!pixel) return 0;
   unsigned index = (((tile >> 10) & 7) << bpp) | pixel;
   const MmxBackgroundPalette *palette = stage && g_mmx_render_asset_repairs ?
@@ -789,7 +815,7 @@ static void sprite(const Ppu *p, const Raster *r, int x, int sy, unsigned attr, 
       unsigned shift = 7 - (cx & 7);
       pixel = ((bits[0] >> shift) & 1) | (((bits[1] >> shift) & 1) << 1) |
           (((bits[16] >> shift) & 1) << 2) | (((bits[17] >> shift) & 1) << 3);
-    } else pixel = tile_pixel(r->vram, base + tile * 16, cx & 7, row & 7, 4);
+    } else pixel = tile_pixel(raster_vram(r), base + tile * 16, cx & 7, row & 7, 4);
     int hud_color = zero_icon ? MmxZeroHudColor(cx, row) : -1;
     if (hud_color >= 0) pixel = 1;
     else if (hud_color == -2) pixel = 0;
@@ -805,7 +831,7 @@ static void sprite(const Ppu *p, const Raster *r, int x, int sy, unsigned attr, 
         if (blue>red && blue>green)
           object_color[dest]=(int)(blue | ((red<green ? red : green)<<5) | (red<<10));
       }
-      if (x + c < 0 || x + c >= 256) ++stats.margin_sprite_pixels;
+      if (x + c < 0 || x + c >= 256) ++ROW_STATS.margin_sprite_pixels;
     }
   }
 }
@@ -1056,6 +1082,8 @@ static void prepare_partner_graphics(void) {
    * captured state, including WRAM-backed armor/effects, and changes no guest
    * memory, transfer timing, or save/rollback layout. */
   partner_raster = frame.lines[0];
+  /* Line 1 always owns its VRAM copy; the partner edits its own. */
+  partner_raster.vram_line = -1;
   unsigned end = frame.ram[0xa3] & ~7u;
   for (unsigned offset=0;offset<end;offset+=8) {
     const uint8_t *dma=frame.ram+0x500+offset;
@@ -1225,6 +1253,406 @@ static void coop_hud_row(const Ppu *ppu,const Raster *r,int y,MmxRenderView view
     }
   }
 }
+/* Everything a row reads that MmxRendererDraw prepares once per frame.
+ * Rows only read it, so they can be composed in any order, on any thread. */
+typedef struct DrawCtx {
+  uint32_t *out;
+  MmxRenderView view;
+  bool hud, stage, menu, zero_menu, weapon_menu, zero_title, swapping;
+  unsigned weapon_page, weapon_item, beam_count, palette_fade, piece_count, waiting_count;
+  const uint16_t *weapon_colors;
+  MmxSpriteAsset x_weapon_palette;
+  LightBeam beams[2];
+  const Piece *pieces;
+  const uint8_t *zero, *blade, *charge;
+  const MmxWeaponShot *triad, *gravity, *cast_body;
+  Piece waiting[128];
+  const MmxSpriteAsset *waiting_zero;
+  const MmxSpriteAsset *piece_assets[MAX_PIECES];
+  int16_t crystal_ripple[224];
+} DrawCtx;
+static DrawCtx s_draw;
+
+static void draw_row(const DrawCtx *c, int y) {
+  uint32_t *out = c->out;
+  MmxRenderView view = c->view;
+  bool hud = c->hud, stage = c->stage, menu = c->menu, zero_menu = c->zero_menu;
+  bool weapon_menu = c->weapon_menu, zero_title = c->zero_title, swapping = c->swapping;
+  unsigned weapon_page = c->weapon_page, weapon_item = c->weapon_item;
+  unsigned beam_count = c->beam_count, palette_fade = c->palette_fade;
+  unsigned piece_count = c->piece_count, waiting_count = c->waiting_count;
+  const uint16_t *weapon_colors = c->weapon_colors;
+  const LightBeam *beams = c->beams;
+  const Piece *pieces = c->pieces;
+  const uint8_t *zero = c->zero, *blade = c->blade, *charge = c->charge;
+  const MmxWeaponShot *triad = c->triad, *gravity = c->gravity, *cast_body = c->cast_body;
+  const Piece *waiting = c->waiting;
+  const MmxSpriteAsset *waiting_zero = c->waiting_zero;
+  const MmxSpriteAsset *const *piece_assets = c->piece_assets;
+  const int16_t *crystal_ripple = c->crystal_ripple;
+  (void)weapon_menu; (void)weapon_page; (void)triad; (void)gravity; (void)beams;
+#define x_weapon_palette (c->x_weapon_palette)
+  const Raster *r = &frame.lines[y]; Ppu p;
+  memcpy(&p, r->registers, PPU_SAVESTATE_REGS_SIZE);
+  if (beam_count) p.cgwsel = (p.cgwsel & 0xcf) | 0x20;
+  if ((p.bgmode & 7) != 1 || (!stage && !menu && !zero_title)) {
+    memcpy(out + y * view.width + view.extra, frame.stock + y * 256, 256 * sizeof(*out));
+    ++ROW_STATS.fallback_lines; return;
+  }
+  ++ROW_STATS.custom_lines;
+  if (p.inidisp & 128) return;
+  uint8_t brightness[32];
+  for (int c = 0; c < 32; ++c) brightness[c] = (uint8_t)(((c << 3) | (c >> 2)) * (p.inidisp & 15) / 15);
+  /* Dialogue masks BG1/BG2 for the panel and subtracts white from the
+   * exposed backdrop ($81:915E). That global subtraction also blacks out
+   * Storm's transparent sky between clouds in the newly exposed margins.
+   * Recognize the captured panel setup across stages; preserve its native
+   * window/text and every other color effect, including transition fades. */
+  bool dialogue_backdrop = g_mmx_render_asset_repairs && p.cgadsub == 0xa0 &&
+      p.cgwsel == 0x80 && p.fixedColor == 0x7fff && p.windowsel == 0x22 &&
+      p.screenWindowed[0] == 3 && (p.screenEnabled[0] & 7) == 7;
+  uint16_t objects[MMX_RENDER_MAX_WIDTH] = {0};
+  int object_colors[MMX_RENDER_MAX_WIDTH];
+  for (int x = 0; x < view.width; ++x) object_colors[x] = -1;
+  for (int i = (int)waiting_count - 1; i >= 0; --i) {
+    Piece s = waiting[i];
+    const MmxSpriteAsset *asset = s.animation == 0x53 ? waiting_zero : NULL;
+    sprite(&p, r, s.x, s.y, s.attr, s.size, y, view, objects, true, asset, s.tile, object_colors, true, false, false);
+  }
+  bool replaced[128] = {false};
+  bool zero_drawn[2] = {false,false};
+  for (int i = (int)piece_count - 1; i >= 0; --i) {
+    Piece s = pieces[i]; const MmxSpriteAsset *asset = piece_assets[i];
+    bool frozen_enemy=stage && (MmxWeaponsFrozenEnemy(&frame_weapon_combat,s.object) ||
+        MmxWeaponsMovedEnemy(&frame_weapon_combat,s.object) || (frame_coop.initialized &&
+        (MmxWeaponsFrozenEnemy(&frame_coop.players[frame_coop.current^1].combat,s.object) ||
+         MmxWeaponsMovedEnemy(&frame_coop.players[frame_coop.current^1].combat,s.object))));
+    if (g_mmx_render_asset_repairs && fortress_sound_actor(s.object) &&
+        (s.x >= 256 || s.x + s.size <= 0)) continue;
+    /* Recorded pieces already obey the retail submission budget. Draw
+     * their entire footprint, including x=255 which native D76A clips.
+     * Only the explicit expanded list can add pieces beyond that budget. */
+    bool center = g_mmx_render_asset_repairs;
+    /* $80:9A3E spawns READY in $1CE8; $81:F091 selects group $19.
+     * Restrict the recolor to this actor during the arrival phase. */
+    bool red_ready=stage && MmxZeroEnabled() && !frame_zero.active_x &&
+        frame.ram[0xd3]==2 && s.object==0x1ce8 && s.animation==0x19;
+    bool red_death = stage && s.animation == 0x1d && MmxZeroDeathOrbRed(frame.ram,s.object);
+    bool coop_buster=stage && frame_coop.initialized && s.object>=0x1228 && s.object<0x1428 &&
+        ((frame.ram[s.object+10]==3 && s.animation==0x9e) ||
+         ((frame.ram[s.object+10]==1 || frame.ram[s.object+10]==2) && s.animation==0x0e));
+    bool menu_body = s.object == 0x1988 && (s.animation == 0 || s.animation == 0x18);
+    bool zero_body = zero && (s.object == 0xba8 || menu_body);
+    bool triad_x_body=cast_body && !zero && s.object==0xba8;
+    bool triad_armor=cast_body && (s.object==0xc38 || s.object==0xc58 || s.object==0xc78);
+    bool swap_actor = swapping && (s.object == 0xba8 || s.object == 0xc38 ||
+        s.object == 0xc58 || s.object == 0xc78 || s.object == 0xc98);
+    bool zero_charge = zero && stage && MmxZeroNativeChargeObject(s.object,frame.ram[s.object+10]);
+    bool zero_armor = zero && (s.object == 0xc38 || s.object == 0xc58 || s.object == 0xc78 ||
+        (zero_menu && (s.object == 0x1928 || s.object == 0x1948 || s.object == 0x1968)));
+    bool oam_match = false;
+    if (g_mmx_render_asset_repairs || coop_buster || zero_body || zero_armor || zero_charge || swap_actor || red_ready || red_death || triad_x_body || triad_armor || frozen_enemy) for (int slot = 16; slot < 128; ++slot) {
+      unsigned pos = r->oam[slot * 2], hi = r->high_oam[slot / 4] >> (slot % 4 * 2);
+      int ox = (pos & 255) | ((hi & 1) << 8); if (ox >= 256) ox -= 512;
+      if (ox == s.x && (pos >> 8) == ((unsigned)s.y & 255) && r->oam[slot * 2 + 1] == s.attr) {
+        oam_match = true;
+        replaced[slot] = true; center = true;
+      }
+    }
+    /* Match original OAM before reprojection. HUD and native script panels
+     * keep screen coordinates; world pieces use the selected peer origin. */
+    if(stage) {s.x-=view_dx;s.y-=view_dy;}
+    /* Resource bindings own CHR/palette, not OBJ priority. Kuwanger's
+     * platform backs deliberately sit behind the tower even though their
+     * foreground pieces use the same resource. Preserve both priority bits
+     * when substituting art, including a missing section's resource. */
+    unsigned attr = asset ? (s.attr & 0xf000) | ((asset->attributes & 15) << 8) |
+        (asset->live_tiles ? s.attr & 255 : 0) : s.attr;
+    if (asset && asset->live_colors) attr = (attr & ~0x0e00u) | (s.attr & 0x0e00u);
+    if (zero_armor || swap_actor || triad_armor || frozen_enemy) continue;
+    if (zero_charge && MmxZeroHasChargeArt() && !frame.ram[0xbdb] && !weapon_item) continue;
+    if (triad_x_body) {
+      if (oam_match && !zero_drawn[0]) {
+        zero_drawn[0]=true;
+        weapon_sprite_row(cast_body,cast_body->pose,
+            (int16_t)(word(frame.ram,0xbad)-view_camera(frame.ram,0x1e4d)),
+            (int16_t)(word(frame.ram,0xbb0)-view_camera(frame.ram,0x1e50)),y,view,objects,object_colors);
+      }
+      continue;
+    }
+    if (zero_body && !oam_match && !(frame.expand && frame.ram[s.object + 14] &&
+        (view_dx || view_dy || s.x + s.size <= 0 || s.x >= 256))) continue;
+    if(stage && frame_coop.initialized && frame_zero.active_x && frame.ram[0xc31] &&
+        s.object>=0xba8 && s.object<0xc98 && !oam_match && !view_dx && !view_dy &&
+        s.x<256 && s.x+s.size>0) continue;
+    if (zero_body) {
+      if (!zero_drawn[menu_body]) {
+        zero_drawn[menu_body] = true;
+        const uint8_t *body = menu_body ? MmxZeroMenuPose() : zero;
+        int zx = menu_body ? 128 : (int16_t)(word(frame.ram, 0xbad) - view_camera(frame.ram,0x1e4d));
+        int zy = menu_body ? 152 : (int16_t)(word(frame.ram, 0xbb0) - view_camera(frame.ram,0x1e50)) + MmxZeroPoseOffsetY(frame.ram);
+        bool pilot = !menu_body && (s.animation==0x6a || s.animation==0x6b);
+        if(pilot) {
+          /* X1 switches to a separate pilot group on boarding. Its pose
+           * numbers are not movement poses. Keep its authored entry/walk/
+           * punch offsets and expose Zero's original helmet/shoulders over
+           * the cockpit. Vanilla X3 Zero has no Ride Armor pilot artwork. */
+          const uint8_t *layout=sprite_arrangement(s.animation,frame.ram[0xbbf]&127);
+          if(layout && layout[0]) {
+            int dx=(int8_t)layout[1]+5;
+            zx+=(frame.ram[0xbb9]&64)?-dx:dx;
+            zy+=8+(int8_t)layout[2]+20;
+          }
+          body=MmxZeroMenuPose();
+        }
+        int row = y - zy + 64;
+        if (row >= 0 && row < MMX_ZERO_HEIGHT && (!pilot || (row>=44 && row<64))) {
+          const uint16_t *colors = MmxZeroColors();
+          unsigned z = ((((s.attr >> 12) & 3) * 4 + 2) << 12) | 0x680;
+          for (int col = 0; col < MMX_ZERO_WIDTH; ++col) {
+            unsigned pixel = body[row * MMX_ZERO_WIDTH + col];
+            if (!menu_body && blade && blade[row * MMX_ZERO_WIDTH + col]) pixel = blade[row * MMX_ZERO_WIDTH + col];
+            int dx = zx + ((!menu_body && (frame.ram[0xbb9] & 64)) ? 63 - col : col - 64) + view.extra;
+            if (pixel && dx >= 0 && dx < view.width) {
+              objects[dx] = (uint16_t)(z | (pixel & 15));
+              /* Charged Sting cycles X1's live player palette. Map Zero's
+               * material/shade roles to that palette instead of discarding
+               * the native cycle; skin and the dark outline remain legible. */
+              static const uint8_t sting_shade[16] = {0,9,4,6,1,14,15,7,8,9,11,10,4,2,3,12};
+              bool sting = !menu_body && frame.ram[0xc31] && pixel >= 16 && pixel < 32;
+              if (sting) {
+                objects[dx] = (uint16_t)((z & ~255u) | (144 + sting_shade[pixel - 16]));
+                object_colors[dx] = -1; /* Live CGRAM already includes fades. */
+              } else object_colors[dx] = !menu_body && pixel >= 16 && pixel < 32 ?
+                  MmxZeroBodyColors(&frame_zero)[pixel - 16] : colors[pixel];
+            }
+          }
+        }
+      }
+      continue;
+    }
+    if (zero_charge) {
+      /* Spread the original motes around Zero's taller body. Keep each
+       * sparkle's pixel art and native animation, timing and visibility. */
+      int cx = (int16_t)(word(frame.ram,0xbad) - view_camera(frame.ram,0x1e4d));
+      int cy = (int16_t)(word(frame.ram,0xbb0) - view_camera(frame.ram,0x1e50));
+      s.x += (s.x + s.size / 2 - cx) / 4;
+      s.y += (s.y + s.size / 2 - cy) / 4 - 6;
+    }
+    /* Extended choices have their own original X palette. Their native
+     * buster proxy must not show the palette of an unrelated locked X1
+     * weapon while navigating the pause screen. Preserve hit flashes. */
+    /* The weapon palette is OBJ palette 1 (CGRAM 144..159, $81:9E8F).
+     * Pieces drawn with another palette (the charge glow, armor parts)
+     * keep live CGRAM: substituting them lost the glow and flattened
+     * the boots. */
+    if (frame_zero.active_x && weapon_colors && zero_actor(s.object, s.animation) &&
+        (menu || ((attr & 0x0e00) == 0x0200 && !x_charging(frame.ram)))) asset = &x_weapon_palette;
+    if(stage && frame_coop.initialized && s.object>=0x1228 && s.object<0x1428 &&
+        frame.ram[s.object+10]==0x0c && s.animation==0x47 && (s.attr&0x0e00)==0x0600)
+      asset=MmxRenderAssetsWeaponX(6,false);
+    if(coop_buster) {
+      const MmxSpriteAsset *beam=MmxRenderAssetsChargedBuster(s.animation,piece_pose(&s));
+      if(beam) asset=beam;
+    }
+    sprite(&p, r, s.x, s.y, attr, s.size, y, view, objects, !center, asset, s.tile, object_colors, true, false, red_ready || red_death);
+  }
+  if (stage) coop_partner_row(&p,r,y,view,objects,object_colors);
+  int bar_first = -1, bar_count = 0;
+  if (hud) for (int slot = 16; slot <= 48; ++slot) {
+    unsigned pos = r->oam[slot * 2], attr = r->oam[slot * 2 + 1];
+    unsigned tile = attr & 255, hi = (r->high_oam[slot / 4] >> (slot % 4 * 2)) & 1;
+    bool bar = !hi && (pos & 255) >= 216 && (pos >> 8) < 96 && ((attr >> 9) & 7) == 2 &&
+        (tile == 128 || tile == 130 || tile == 132 || tile == 134 || tile == 170);
+    if (bar) { if (bar_first < 0) bar_first = slot; ++bar_count; }
+    else if (bar_first >= 0) break;
+  }
+  static const int sizes[8][2] = {{8,16},{8,32},{8,64},{16,32},{16,64},{32,64},{16,32},{16,32}};
+  bool coop_hud=stage && frame_coop.initialized && r->oam[0]==0x5008 && r->oam[1]==0x3486;
+  for (int slot = 127; slot >= 0; --slot) {
+    if(coop_hud && slot<16) continue;
+    if (replaced[slot]) continue;
+    unsigned pos = r->oam[slot * 2], attr = r->oam[slot * 2 + 1];
+    unsigned hi = r->high_oam[slot / 4] >> (slot % 4 * 2);
+    int x = (pos & 255) | ((hi & 1) << 8), sy = pos >> 8;
+    if (x >= 256) x -= 512;
+    int size = sizes[p.obsel >> 5][(hi >> 1) & 1];
+    if (x + size <= 0 || x >= 256) continue;
+    /* Only the player's HUD badge: not weapon icons, bosses or actors.
+     * This remains visible while the player blinks or has no body pieces. */
+    bool zero_icon = (stage || zero_menu) && MmxZeroEnabled() && !frame_zero.active_x && slot == 0 &&
+        x == 8 && sy == 80 && attr == 0x3486 && size == 16;
+    bool anchored = stage && hud && sy < 96 && (slot < 16 || (bar_count >= 4 && slot >= bar_first && slot < bar_first + bar_count));
+    if(stage && !anchored) {x-=view_dx;sy-=view_dy;}
+    if (anchored) { if (x < 25) x -= view.extra; else if (x >= 216) x += view.extra; }
+    if (stage && frame_weapons.page && frame_weapons.weapon && slot == 7 && (pos & 255) == 24 && sy == 80 && attr == 0x3620) {
+      /* Dedicated source gameplay footer, with its original frame,
+       * pixels and weapon palette. Menu icons are a different asset. */
+      const MmxWeaponPose *icon=MmxWeaponsHudIcon(frame_weapons.page,frame_weapons.weapon);
+      const uint16_t *colors=MmxWeaponsPalette(frame_weapons.page,frame_weapons.weapon,false);
+      int row=y-sy;
+      if (icon && colors && row>=0 && row<16) for(int col=0;col<16;++col) {
+        unsigned pixel=icon->pixels[row*16+col];
+        int dx=x+col+view.extra;
+        if(pixel && dx>=0 && dx<view.width) {
+          objects[dx]=(uint16_t)(0xe6b0|pixel);object_colors[dx]=colors[pixel];
+        }
+      }
+      continue;
+    }
+    sprite(&p, r, x, sy, attr, size, y, view, objects, false, NULL, 0, object_colors, false, zero_icon, false);
+  }
+  if (charge && zero_drawn[0] && !swapping) {
+    int zx=(int16_t)(word(frame.ram,0xbad)-view_camera(frame.ram,0x1e4d));
+    int zy=(int16_t)(word(frame.ram,0xbb0)-view_camera(frame.ram,0x1e50))-8;
+    int row=y-zy+64;
+    unsigned palette=frame_zero.charge>=81 && frame_zero.charge<201 ? 32 : 0;
+    if(row>=0 && row<MMX_ZERO_HEIGHT) for(int col=0;col<MMX_ZERO_WIDTH;++col) {
+      unsigned pixel=charge[row*MMX_ZERO_WIDTH+col];
+      int dx=zx+((frame.ram[0xbb9]&64)?63-col:col-64)+view.extra;
+      if(pixel && dx>=0 && dx<view.width) {
+        objects[dx]=(uint16_t)(0xe680|pixel); object_colors[dx]=MmxZeroColors()[palette+pixel];
+      }
+    }
+  }
+  if (stage && !swapping) {
+    weapon_effects_row(&frame_weapon_combat,&p,r,y,view,objects,object_colors);
+    if (frame_coop.initialized && frame_coop.players[frame_coop.current^1].status==MMX_COOP_ALIVE && !frame_coop.scene_owner)
+      weapon_effects_row(&frame_coop.players[frame_coop.current^1].combat,&p,r,y,view,objects,object_colors);
+  }
+  if (swapping) teleport_actor_row(frame.ram,&frame_zero,&p,r,y,view,objects,object_colors);
+  if(coop_hud) coop_hud_row(&p,r,y,view,hud,objects,object_colors);
+  for (int sx = 0; sx < view.width; ++sx) {
+    int x = sx - view.extra;
+    if (menu && (x < 0 || x >= 256)) { out[y * view.width + sx] = 0; continue; }
+    uint16_t screens[2] = {0x500, 0x500}, bg[3] = {0};
+    int bg_colors[3] = {-1, -1, -1};
+    for (int layer = 0; layer < 3; ++layer) if ((p.screenEnabled[0] | p.screenEnabled[1]) & (1 << layer)) {
+      int bx = x, by = y + 1;
+      if (stage && layer==0) by+=crystal_ripple[y];
+      if (p.mosaic & (1 << layer)) { int size = (p.mosaic >> 4) + 1;
+        bx -= ((bx % size) + size) % size; by -= by % size; }
+      bg[layer] = background(&p, r, layer, bx, by, stage, &bg_colors[layer]);
+    }
+    if (palette_fade) {
+      for (int layer = 0; layer < 3; ++layer) if (bg_colors[layer] >= 0)
+        bg_colors[layer] = MmxRenderAssetsFadeColor((uint16_t)bg_colors[layer], palette_fade);
+      if (object_colors[sx] >= 0)
+        object_colors[sx] = MmxRenderAssetsFadeColor((uint16_t)object_colors[sx], palette_fade);
+    }
+    for (int sub = 0; sub < 2; ++sub) {
+      for (int layer = 0; layer < 3; ++layer)
+        if ((p.screenEnabled[sub] & (1 << layer)) &&
+            (!(p.screenWindowed[sub] & (1 << layer)) || !window(&p, layer, x, view.extra)) && bg[layer] > screens[sub]) screens[sub] = bg[layer];
+      if ((p.screenEnabled[sub] & 16) && (!(p.screenWindowed[sub] & 16) || !window(&p, 4, x, view.extra)) &&
+          objects[sx] > screens[sub]) screens[sub] = objects[sx];
+    }
+    bool color_window = window(&p, 5, x, view.extra);
+    if (beam_count) {
+      color_window = false;
+      for (unsigned i = 0; i < beam_count; ++i)
+        color_window |= x >= beams[i].left[y] && x <= beams[i].right[y];
+    }
+    out[y * view.width + sx] = colour(&p, r->palette, brightness, screens[0], screens[1], color_window, object_colors[sx], bg_colors,
+                                     dialogue_backdrop && (x < 0 || x >= 256));
+  }
+#undef x_weapon_palette
+}
+
+/* Row composition is the custom renderer's whole cost: ~12 ms of a frame on a
+ * desktop CPU, more than a Switch frame on its A57. Rows are independent, so
+ * worker threads take them from a shared counter while the caller takes its
+ * share too. MMX_RENDER_THREADS=<n> picks the worker count (0 = this thread
+ * only); the default is 2 on Switch (cores 1 and 2) and 0 elsewhere. */
+#if defined(__SWITCH__) || defined(__linux__)
+#define MMX_RENDER_THREADS_AVAILABLE 1
+#include <pthread.h>
+#include <stdlib.h>
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
+enum { kRenderMaxWorkers = 3, kRenderRowChunk = 4 };
+static pthread_t s_render_workers[kRenderMaxWorkers];
+static pthread_mutex_t s_render_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t s_render_go = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t s_render_done = PTHREAD_COND_INITIALIZER;
+static unsigned s_render_generation, s_render_pending;
+static int s_render_next, s_render_worker_count = -1;
+static void render_take_rows(void) {
+  memset(&s_row_stats, 0, sizeof(s_row_stats));
+  for (;;) {
+    int y = __atomic_fetch_add(&s_render_next, kRenderRowChunk, __ATOMIC_RELAXED);
+    if (y >= 224) break;
+    for (int end = y + kRenderRowChunk; y < end && y < 224; ++y) draw_row(&s_draw, y);
+  }
+  __atomic_fetch_add(&stats.custom_lines, s_row_stats.custom_lines, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&stats.fallback_lines, s_row_stats.fallback_lines, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&stats.margin_sprite_pixels, s_row_stats.margin_sprite_pixels, __ATOMIC_RELAXED);
+}
+static void *render_worker(void *arg) {
+#if defined(__SWITCH__)
+  /* Cores 1 and 2: the caller (the main thread) keeps core 0. */
+  int core = 1 + (int)(intptr_t)arg;
+  svcSetThreadCoreMask(threadGetCurHandle(), core, 1u << core);
+#else
+  (void)arg;
+#endif
+  unsigned seen = 0;
+  for (;;) {
+    pthread_mutex_lock(&s_render_mutex);
+    while (s_render_generation == seen) pthread_cond_wait(&s_render_go, &s_render_mutex);
+    seen = s_render_generation;
+    pthread_mutex_unlock(&s_render_mutex);
+    render_take_rows();
+    pthread_mutex_lock(&s_render_mutex);
+    if (--s_render_pending == 0) pthread_cond_signal(&s_render_done);
+    pthread_mutex_unlock(&s_render_mutex);
+  }
+  return NULL;
+}
+static void render_start_workers(void) {
+  const char *env = getenv("MMX_RENDER_THREADS");
+#if defined(__SWITCH__)
+  int wanted = env && *env ? atoi(env) : 2;
+#else
+  int wanted = env && *env ? atoi(env) : 0;
+#endif
+  if (wanted < 0) wanted = 0;
+  if (wanted > kRenderMaxWorkers) wanted = kRenderMaxWorkers;
+  s_render_worker_count = 0;
+  for (int i = 0; i < wanted; ++i) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    /* MmxRendererDraw's rows were measured at ~250 KiB of stack together. */
+    pthread_attr_setstacksize(&attr, 1024 * 1024);
+    int rc = pthread_create(&s_render_workers[i], &attr, render_worker, (void *)(intptr_t)i);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) break;
+    ++s_render_worker_count;
+  }
+  fprintf(stderr, "[mmx-renderer] composing rows on %d worker thread(s) + caller\n",
+          s_render_worker_count);
+}
+static void render_rows(void) {
+  if (s_render_worker_count < 0) render_start_workers();
+  s_render_next = 0;
+  if (s_render_worker_count == 0) { render_take_rows(); return; }
+  pthread_mutex_lock(&s_render_mutex);
+  s_render_pending = (unsigned)s_render_worker_count;
+  ++s_render_generation;
+  pthread_cond_broadcast(&s_render_go);
+  pthread_mutex_unlock(&s_render_mutex);
+  render_take_rows();
+  pthread_mutex_lock(&s_render_mutex);
+  while (s_render_pending) pthread_cond_wait(&s_render_done, &s_render_mutex);
+  pthread_mutex_unlock(&s_render_mutex);
+}
+#else
+static void render_rows(void) {
+  for (int y = 0; y < 224; ++y) draw_row(&s_draw, y);
+}
+#endif
+
 bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   if (!out || !frame.valid || view.width < 256 || view.width > MMX_RENDER_MAX_WIDTH ||
       view.extra != (view.width - 256) / 2 || (view.width & 1)) return false;
@@ -1314,271 +1742,22 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   if (frame_coop.initialized && MmxWeaponsTimePhase(&frame_coop.players[frame_coop.current^1].combat)==1 &&
       MmxWeaponsTimePhase(&frame_weapon_combat)!=1)
     MmxWeaponsTimeRipple(&frame_coop.players[frame_coop.current^1].combat,crystal_ripple);
-  for (int y = 0; y < 224; ++y) {
-    const Raster *r = &frame.lines[y]; Ppu p;
-    memcpy(&p, r->registers, PPU_SAVESTATE_REGS_SIZE);
-    if (beam_count) p.cgwsel = (p.cgwsel & 0xcf) | 0x20;
-    if ((p.bgmode & 7) != 1 || (!stage && !menu && !zero_title)) {
-      memcpy(out + y * view.width + view.extra, frame.stock + y * 256, 256 * sizeof(*out));
-      ++stats.fallback_lines; continue;
-    }
-    ++stats.custom_lines;
-    if (p.inidisp & 128) continue;
-    uint8_t brightness[32];
-    for (int c = 0; c < 32; ++c) brightness[c] = (uint8_t)(((c << 3) | (c >> 2)) * (p.inidisp & 15) / 15);
-    /* Dialogue masks BG1/BG2 for the panel and subtracts white from the
-     * exposed backdrop ($81:915E). That global subtraction also blacks out
-     * Storm's transparent sky between clouds in the newly exposed margins.
-     * Recognize the captured panel setup across stages; preserve its native
-     * window/text and every other color effect, including transition fades. */
-    bool dialogue_backdrop = g_mmx_render_asset_repairs && p.cgadsub == 0xa0 &&
-        p.cgwsel == 0x80 && p.fixedColor == 0x7fff && p.windowsel == 0x22 &&
-        p.screenWindowed[0] == 3 && (p.screenEnabled[0] & 7) == 7;
-    uint16_t objects[MMX_RENDER_MAX_WIDTH] = {0};
-    int object_colors[MMX_RENDER_MAX_WIDTH];
-    for (int x = 0; x < view.width; ++x) object_colors[x] = -1;
-    for (int i = (int)waiting_count - 1; i >= 0; --i) {
-      Piece s = waiting[i];
-      const MmxSpriteAsset *asset = s.animation == 0x53 ? waiting_zero : NULL;
-      sprite(&p, r, s.x, s.y, s.attr, s.size, y, view, objects, true, asset, s.tile, object_colors, true, false, false);
-    }
-    bool replaced[128] = {false};
-    bool zero_drawn[2] = {false,false};
-    for (int i = (int)piece_count - 1; i >= 0; --i) {
-      Piece s = pieces[i]; const MmxSpriteAsset *asset = piece_assets[i];
-      bool frozen_enemy=stage && (MmxWeaponsFrozenEnemy(&frame_weapon_combat,s.object) ||
-          MmxWeaponsMovedEnemy(&frame_weapon_combat,s.object) || (frame_coop.initialized &&
-          (MmxWeaponsFrozenEnemy(&frame_coop.players[frame_coop.current^1].combat,s.object) ||
-           MmxWeaponsMovedEnemy(&frame_coop.players[frame_coop.current^1].combat,s.object))));
-      if (g_mmx_render_asset_repairs && fortress_sound_actor(s.object) &&
-          (s.x >= 256 || s.x + s.size <= 0)) continue;
-      /* Recorded pieces already obey the retail submission budget. Draw
-       * their entire footprint, including x=255 which native D76A clips.
-       * Only the explicit expanded list can add pieces beyond that budget. */
-      bool center = g_mmx_render_asset_repairs;
-      /* $80:9A3E spawns READY in $1CE8; $81:F091 selects group $19.
-       * Restrict the recolor to this actor during the arrival phase. */
-      bool red_ready=stage && MmxZeroEnabled() && !frame_zero.active_x &&
-          frame.ram[0xd3]==2 && s.object==0x1ce8 && s.animation==0x19;
-      bool red_death = stage && s.animation == 0x1d && MmxZeroDeathOrbRed(frame.ram,s.object);
-      bool coop_buster=stage && frame_coop.initialized && s.object>=0x1228 && s.object<0x1428 &&
-          ((frame.ram[s.object+10]==3 && s.animation==0x9e) ||
-           ((frame.ram[s.object+10]==1 || frame.ram[s.object+10]==2) && s.animation==0x0e));
-      bool menu_body = s.object == 0x1988 && (s.animation == 0 || s.animation == 0x18);
-      bool zero_body = zero && (s.object == 0xba8 || menu_body);
-      bool triad_x_body=cast_body && !zero && s.object==0xba8;
-      bool triad_armor=cast_body && (s.object==0xc38 || s.object==0xc58 || s.object==0xc78);
-      bool swap_actor = swapping && (s.object == 0xba8 || s.object == 0xc38 ||
-          s.object == 0xc58 || s.object == 0xc78 || s.object == 0xc98);
-      bool zero_charge = zero && stage && MmxZeroNativeChargeObject(s.object,frame.ram[s.object+10]);
-      bool zero_armor = zero && (s.object == 0xc38 || s.object == 0xc58 || s.object == 0xc78 ||
-          (zero_menu && (s.object == 0x1928 || s.object == 0x1948 || s.object == 0x1968)));
-      bool oam_match = false;
-      if (g_mmx_render_asset_repairs || coop_buster || zero_body || zero_armor || zero_charge || swap_actor || red_ready || red_death || triad_x_body || triad_armor || frozen_enemy) for (int slot = 16; slot < 128; ++slot) {
-        unsigned pos = r->oam[slot * 2], hi = r->high_oam[slot / 4] >> (slot % 4 * 2);
-        int ox = (pos & 255) | ((hi & 1) << 8); if (ox >= 256) ox -= 512;
-        if (ox == s.x && (pos >> 8) == ((unsigned)s.y & 255) && r->oam[slot * 2 + 1] == s.attr) {
-          oam_match = true;
-          replaced[slot] = true; center = true;
-        }
-      }
-      /* Match original OAM before reprojection. HUD and native script panels
-       * keep screen coordinates; world pieces use the selected peer origin. */
-      if(stage) {s.x-=view_dx;s.y-=view_dy;}
-      /* Resource bindings own CHR/palette, not OBJ priority. Kuwanger's
-       * platform backs deliberately sit behind the tower even though their
-       * foreground pieces use the same resource. Preserve both priority bits
-       * when substituting art, including a missing section's resource. */
-      unsigned attr = asset ? (s.attr & 0xf000) | ((asset->attributes & 15) << 8) |
-          (asset->live_tiles ? s.attr & 255 : 0) : s.attr;
-      if (asset && asset->live_colors) attr = (attr & ~0x0e00u) | (s.attr & 0x0e00u);
-      if (zero_armor || swap_actor || triad_armor || frozen_enemy) continue;
-      if (zero_charge && MmxZeroHasChargeArt() && !frame.ram[0xbdb] && !weapon_item) continue;
-      if (triad_x_body) {
-        if (oam_match && !zero_drawn[0]) {
-          zero_drawn[0]=true;
-          weapon_sprite_row(cast_body,cast_body->pose,
-              (int16_t)(word(frame.ram,0xbad)-view_camera(frame.ram,0x1e4d)),
-              (int16_t)(word(frame.ram,0xbb0)-view_camera(frame.ram,0x1e50)),y,view,objects,object_colors);
-        }
-        continue;
-      }
-      if (zero_body && !oam_match && !(frame.expand && frame.ram[s.object + 14] &&
-          (view_dx || view_dy || s.x + s.size <= 0 || s.x >= 256))) continue;
-      if(stage && frame_coop.initialized && frame_zero.active_x && frame.ram[0xc31] &&
-          s.object>=0xba8 && s.object<0xc98 && !oam_match && !view_dx && !view_dy &&
-          s.x<256 && s.x+s.size>0) continue;
-      if (zero_body) {
-        if (!zero_drawn[menu_body]) {
-          zero_drawn[menu_body] = true;
-          const uint8_t *body = menu_body ? MmxZeroMenuPose() : zero;
-          int zx = menu_body ? 128 : (int16_t)(word(frame.ram, 0xbad) - view_camera(frame.ram,0x1e4d));
-          int zy = menu_body ? 152 : (int16_t)(word(frame.ram, 0xbb0) - view_camera(frame.ram,0x1e50)) + MmxZeroPoseOffsetY(frame.ram);
-          bool pilot = !menu_body && (s.animation==0x6a || s.animation==0x6b);
-          if(pilot) {
-            /* X1 switches to a separate pilot group on boarding. Its pose
-             * numbers are not movement poses. Keep its authored entry/walk/
-             * punch offsets and expose Zero's original helmet/shoulders over
-             * the cockpit. Vanilla X3 Zero has no Ride Armor pilot artwork. */
-            const uint8_t *layout=sprite_arrangement(s.animation,frame.ram[0xbbf]&127);
-            if(layout && layout[0]) {
-              int dx=(int8_t)layout[1]+5;
-              zx+=(frame.ram[0xbb9]&64)?-dx:dx;
-              zy+=8+(int8_t)layout[2]+20;
-            }
-            body=MmxZeroMenuPose();
-          }
-          int row = y - zy + 64;
-          if (row >= 0 && row < MMX_ZERO_HEIGHT && (!pilot || (row>=44 && row<64))) {
-            const uint16_t *colors = MmxZeroColors();
-            unsigned z = ((((s.attr >> 12) & 3) * 4 + 2) << 12) | 0x680;
-            for (int col = 0; col < MMX_ZERO_WIDTH; ++col) {
-              unsigned pixel = body[row * MMX_ZERO_WIDTH + col];
-              if (!menu_body && blade && blade[row * MMX_ZERO_WIDTH + col]) pixel = blade[row * MMX_ZERO_WIDTH + col];
-              int dx = zx + ((!menu_body && (frame.ram[0xbb9] & 64)) ? 63 - col : col - 64) + view.extra;
-              if (pixel && dx >= 0 && dx < view.width) {
-                objects[dx] = (uint16_t)(z | (pixel & 15));
-                /* Charged Sting cycles X1's live player palette. Map Zero's
-                 * material/shade roles to that palette instead of discarding
-                 * the native cycle; skin and the dark outline remain legible. */
-                static const uint8_t sting_shade[16] = {0,9,4,6,1,14,15,7,8,9,11,10,4,2,3,12};
-                bool sting = !menu_body && frame.ram[0xc31] && pixel >= 16 && pixel < 32;
-                if (sting) {
-                  objects[dx] = (uint16_t)((z & ~255u) | (144 + sting_shade[pixel - 16]));
-                  object_colors[dx] = -1; /* Live CGRAM already includes fades. */
-                } else object_colors[dx] = !menu_body && pixel >= 16 && pixel < 32 ?
-                    MmxZeroBodyColors(&frame_zero)[pixel - 16] : colors[pixel];
-              }
-            }
-          }
-        }
-        continue;
-      }
-      if (zero_charge) {
-        /* Spread the original motes around Zero's taller body. Keep each
-         * sparkle's pixel art and native animation, timing and visibility. */
-        int cx = (int16_t)(word(frame.ram,0xbad) - view_camera(frame.ram,0x1e4d));
-        int cy = (int16_t)(word(frame.ram,0xbb0) - view_camera(frame.ram,0x1e50));
-        s.x += (s.x + s.size / 2 - cx) / 4;
-        s.y += (s.y + s.size / 2 - cy) / 4 - 6;
-      }
-      /* Extended choices have their own original X palette. Their native
-       * buster proxy must not show the palette of an unrelated locked X1
-       * weapon while navigating the pause screen. Preserve hit flashes. */
-      /* The weapon palette is OBJ palette 1 (CGRAM 144..159, $81:9E8F).
-       * Pieces drawn with another palette (the charge glow, armor parts)
-       * keep live CGRAM: substituting them lost the glow and flattened
-       * the boots. */
-      if (frame_zero.active_x && weapon_colors && zero_actor(s.object, s.animation) &&
-          (menu || ((attr & 0x0e00) == 0x0200 && !x_charging(frame.ram)))) asset = &x_weapon_palette;
-      if(stage && frame_coop.initialized && s.object>=0x1228 && s.object<0x1428 &&
-          frame.ram[s.object+10]==0x0c && s.animation==0x47 && (s.attr&0x0e00)==0x0600)
-        asset=MmxRenderAssetsWeaponX(6,false);
-      if(coop_buster) {
-        const MmxSpriteAsset *beam=MmxRenderAssetsChargedBuster(s.animation,piece_pose(&s));
-        if(beam) asset=beam;
-      }
-      sprite(&p, r, s.x, s.y, attr, s.size, y, view, objects, !center, asset, s.tile, object_colors, true, false, red_ready || red_death);
-    }
-    if (stage) coop_partner_row(&p,r,y,view,objects,object_colors);
-    int bar_first = -1, bar_count = 0;
-    if (hud) for (int slot = 16; slot <= 48; ++slot) {
-      unsigned pos = r->oam[slot * 2], attr = r->oam[slot * 2 + 1];
-      unsigned tile = attr & 255, hi = (r->high_oam[slot / 4] >> (slot % 4 * 2)) & 1;
-      bool bar = !hi && (pos & 255) >= 216 && (pos >> 8) < 96 && ((attr >> 9) & 7) == 2 &&
-          (tile == 128 || tile == 130 || tile == 132 || tile == 134 || tile == 170);
-      if (bar) { if (bar_first < 0) bar_first = slot; ++bar_count; }
-      else if (bar_first >= 0) break;
-    }
-    static const int sizes[8][2] = {{8,16},{8,32},{8,64},{16,32},{16,64},{32,64},{16,32},{16,32}};
-    bool coop_hud=stage && frame_coop.initialized && r->oam[0]==0x5008 && r->oam[1]==0x3486;
-    for (int slot = 127; slot >= 0; --slot) {
-      if(coop_hud && slot<16) continue;
-      if (replaced[slot]) continue;
-      unsigned pos = r->oam[slot * 2], attr = r->oam[slot * 2 + 1];
-      unsigned hi = r->high_oam[slot / 4] >> (slot % 4 * 2);
-      int x = (pos & 255) | ((hi & 1) << 8), sy = pos >> 8;
-      if (x >= 256) x -= 512;
-      int size = sizes[p.obsel >> 5][(hi >> 1) & 1];
-      if (x + size <= 0 || x >= 256) continue;
-      /* Only the player's HUD badge: not weapon icons, bosses or actors.
-       * This remains visible while the player blinks or has no body pieces. */
-      bool zero_icon = (stage || zero_menu) && MmxZeroEnabled() && !frame_zero.active_x && slot == 0 &&
-          x == 8 && sy == 80 && attr == 0x3486 && size == 16;
-      bool anchored = stage && hud && sy < 96 && (slot < 16 || (bar_count >= 4 && slot >= bar_first && slot < bar_first + bar_count));
-      if(stage && !anchored) {x-=view_dx;sy-=view_dy;}
-      if (anchored) { if (x < 25) x -= view.extra; else if (x >= 216) x += view.extra; }
-      if (stage && frame_weapons.page && frame_weapons.weapon && slot == 7 && (pos & 255) == 24 && sy == 80 && attr == 0x3620) {
-        /* Dedicated source gameplay footer, with its original frame,
-         * pixels and weapon palette. Menu icons are a different asset. */
-        const MmxWeaponPose *icon=MmxWeaponsHudIcon(frame_weapons.page,frame_weapons.weapon);
-        const uint16_t *colors=MmxWeaponsPalette(frame_weapons.page,frame_weapons.weapon,false);
-        int row=y-sy;
-        if (icon && colors && row>=0 && row<16) for(int col=0;col<16;++col) {
-          unsigned pixel=icon->pixels[row*16+col];
-          int dx=x+col+view.extra;
-          if(pixel && dx>=0 && dx<view.width) {
-            objects[dx]=(uint16_t)(0xe6b0|pixel);object_colors[dx]=colors[pixel];
-          }
-        }
-        continue;
-      }
-      sprite(&p, r, x, sy, attr, size, y, view, objects, false, NULL, 0, object_colors, false, zero_icon, false);
-    }
-    if (charge && zero_drawn[0] && !swapping) {
-      int zx=(int16_t)(word(frame.ram,0xbad)-view_camera(frame.ram,0x1e4d));
-      int zy=(int16_t)(word(frame.ram,0xbb0)-view_camera(frame.ram,0x1e50))-8;
-      int row=y-zy+64;
-      unsigned palette=frame_zero.charge>=81 && frame_zero.charge<201 ? 32 : 0;
-      if(row>=0 && row<MMX_ZERO_HEIGHT) for(int col=0;col<MMX_ZERO_WIDTH;++col) {
-        unsigned pixel=charge[row*MMX_ZERO_WIDTH+col];
-        int dx=zx+((frame.ram[0xbb9]&64)?63-col:col-64)+view.extra;
-        if(pixel && dx>=0 && dx<view.width) {
-          objects[dx]=(uint16_t)(0xe680|pixel); object_colors[dx]=MmxZeroColors()[palette+pixel];
-        }
-      }
-    }
-    if (stage && !swapping) {
-      weapon_effects_row(&frame_weapon_combat,&p,r,y,view,objects,object_colors);
-      if (frame_coop.initialized && frame_coop.players[frame_coop.current^1].status==MMX_COOP_ALIVE && !frame_coop.scene_owner)
-        weapon_effects_row(&frame_coop.players[frame_coop.current^1].combat,&p,r,y,view,objects,object_colors);
-    }
-    if (swapping) teleport_actor_row(frame.ram,&frame_zero,&p,r,y,view,objects,object_colors);
-    if(coop_hud) coop_hud_row(&p,r,y,view,hud,objects,object_colors);
-    for (int sx = 0; sx < view.width; ++sx) {
-      int x = sx - view.extra;
-      if (menu && (x < 0 || x >= 256)) { out[y * view.width + sx] = 0; continue; }
-      uint16_t screens[2] = {0x500, 0x500}, bg[3] = {0};
-      int bg_colors[3] = {-1, -1, -1};
-      for (int layer = 0; layer < 3; ++layer) if ((p.screenEnabled[0] | p.screenEnabled[1]) & (1 << layer)) {
-        int bx = x, by = y + 1;
-        if (stage && layer==0) by+=crystal_ripple[y];
-        if (p.mosaic & (1 << layer)) { int size = (p.mosaic >> 4) + 1;
-          bx -= ((bx % size) + size) % size; by -= by % size; }
-        bg[layer] = background(&p, r, layer, bx, by, stage, &bg_colors[layer]);
-      }
-      if (palette_fade) {
-        for (int layer = 0; layer < 3; ++layer) if (bg_colors[layer] >= 0)
-          bg_colors[layer] = MmxRenderAssetsFadeColor((uint16_t)bg_colors[layer], palette_fade);
-        if (object_colors[sx] >= 0)
-          object_colors[sx] = MmxRenderAssetsFadeColor((uint16_t)object_colors[sx], palette_fade);
-      }
-      for (int sub = 0; sub < 2; ++sub) {
-        for (int layer = 0; layer < 3; ++layer)
-          if ((p.screenEnabled[sub] & (1 << layer)) &&
-              (!(p.screenWindowed[sub] & (1 << layer)) || !window(&p, layer, x, view.extra)) && bg[layer] > screens[sub]) screens[sub] = bg[layer];
-        if ((p.screenEnabled[sub] & 16) && (!(p.screenWindowed[sub] & 16) || !window(&p, 4, x, view.extra)) &&
-            objects[sx] > screens[sub]) screens[sub] = objects[sx];
-      }
-      bool color_window = window(&p, 5, x, view.extra);
-      if (beam_count) {
-        color_window = false;
-        for (unsigned i = 0; i < beam_count; ++i)
-          color_window |= x >= beams[i].left[y] && x <= beams[i].right[y];
-      }
-      out[y * view.width + sx] = colour(&p, r->palette, brightness, screens[0], screens[1], color_window, object_colors[sx], bg_colors,
-                                       dialogue_backdrop && (x < 0 || x >= 256));
-    }
-  }
+  /* Hand the per-frame preparation to the rows (see DrawCtx). */
+  DrawCtx *c = &s_draw;
+  c->out = out; c->view = view; c->hud = hud; c->stage = stage; c->menu = menu;
+  c->zero_menu = zero_menu; c->weapon_menu = weapon_menu; c->zero_title = zero_title;
+  c->swapping = swapping; c->weapon_page = weapon_page; c->weapon_item = weapon_item;
+  c->weapon_colors = weapon_colors; c->x_weapon_palette = x_weapon_palette;
+  memcpy(c->beams, beams, sizeof(c->beams)); c->beam_count = beam_count;
+  c->palette_fade = palette_fade; c->pieces = pieces; c->piece_count = piece_count;
+  c->zero = zero; c->blade = blade; c->charge = charge;
+  c->triad = triad; c->gravity = gravity; c->cast_body = cast_body;
+  memcpy(c->waiting, waiting, waiting_count * sizeof(*waiting));
+  c->waiting_count = waiting_count; c->waiting_zero = waiting_zero;
+  memcpy(c->piece_assets, piece_assets, piece_count * sizeof(*piece_assets));
+  memcpy(c->crystal_ripple, crystal_ripple, sizeof(c->crystal_ripple));
+  /* Background caches are built here, single-threaded: rows only read them. */
+  if (stage && g_mmx_render_asset_repairs) MmxRenderAssetsPrepareFrame(frame.ram);
+  render_rows();
   return true;
 }

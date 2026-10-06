@@ -249,6 +249,11 @@ void publish(const char *output,const Bytes& bytes) {
 #ifdef _WIN32
     require(MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0,"Cannot publish local mod cache.");
 #else
+#ifdef __SWITCH__
+    /* Horizon's rename refuses an existing target instead of replacing it,
+     * so every start after the first would fail to refresh the cache. */
+    { std::error_code ec; fs::remove(path,ec); }
+#endif
     fs::rename(temp,path);
 #endif
   } catch (...) { std::error_code ec;fs::remove(temp,ec);throw; }

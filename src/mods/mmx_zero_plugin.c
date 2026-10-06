@@ -190,6 +190,16 @@ void MmxZeroRegisterHooks(void) {
   for (unsigned i=0;i<sizeof(energy_pcs)/sizeof(energy_pcs[0]);++i)
     interp_bridge_set_pre_opcode_hook(energy_pcs[i],weapon_energy_hook);
 }
+/* Desktop: a native error box. Switch SDL has no message box, and the game's
+ * window is the only one there is, so the log carries the reason instead. */
+static void MmxModErrorBox(const char *title, const char *message, SDL_Window *window) {
+#if defined(__SWITCH__)
+  (void)window;
+  fprintf(stderr, "[mmx-mod] %s: %s\n", title, message);
+#else
+  SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, message, window);
+#endif
+}
 static int prepare(const char *package, const char *feature, unsigned game, int zero, char path[4096]) {
   const RecompLauncherCModProvider *provider = snes_mod_runtime_launcher_provider_c();
   RecompLauncherCModResource resource = {0};
@@ -200,7 +210,7 @@ static int prepare(const char *package, const char *feature, unsigned game, int 
   if (!snesrecomp_exe_dir_path(leaf,path,4096)) return 0;
   if (MmxSourceAssetsBuild(resource.path,game,zero,path,error,sizeof(error))) return 1;
   fprintf(stderr,"[mmx-source] %s\n",error);
-  SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Cannot prepare Mega Man mod",error,NULL);
+  MmxModErrorBox("Cannot prepare Mega Man mod",error,NULL);
   return 0;
 }
 static void activate(void) {
@@ -231,7 +241,7 @@ static void activate_coop(void) {
   unsigned p1=!strcmp(character,"zero") ? MMX_COOP_ZERO : MMX_COOP_X;
   MmxZeroRegisterHooks();MmxCoopRegisterHooks();
   if(!MmxCoopEnable(p1)) {
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Cannot enable co-op","Cannot initialize the selected characters.",NULL);
+    MmxModErrorBox("Cannot enable co-op","Cannot initialize the selected characters.",NULL);
     return;
   }
   fprintf(stderr,"[mmx-coop] Co-op enabled; P1 is %s\n",p1==MMX_COOP_X?"X":"Zero");
@@ -241,7 +251,7 @@ static void activate_weapons(unsigned game) {
   const char *package=game==2?"megaman-x.weapons.x2":"megaman-x.weapons.x3";
   if (!prepare(package,"weapons",game,0,path)) return;
   if (!MmxWeaponsLoadPage(path,game-1)) {
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Cannot prepare Mega Man mod","Cannot load the generated weapon data.",NULL);
+    MmxModErrorBox("Cannot prepare Mega Man mod","Cannot load the generated weapon data.",NULL);
     return;
   }
   MmxZeroRegisterHooks();

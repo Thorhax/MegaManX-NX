@@ -34,6 +34,8 @@ typedef struct MmxBackgroundPalette {
  * side of the viewport it occupies. NULL retains the current live resource. */
 const uint8_t *MmxRenderAssetsBackgroundTile(const uint8_t ram[0x20000],
                                             int world_x, unsigned vram_word);
+/* Builds every background phase for the current stage before rows run. */
+void MmxRenderAssetsPrepareFrame(const uint8_t ram[0x20000]);
 const MmxBackgroundPalette *MmxRenderAssetsBackgroundPalette(const uint8_t ram[0x20000],
                                                              int world_x);
 const MmxBackgroundPalette *MmxRenderAssetsBackgroundPalettePhase(const uint8_t ram[0x20000], unsigned phase);

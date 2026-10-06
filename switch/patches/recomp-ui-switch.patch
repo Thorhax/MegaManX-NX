@@ -1,0 +1,306 @@
+diff --git a/recomp_ui.cmake b/recomp_ui.cmake
+index c41da2d..755a173 100644
+--- a/recomp_ui.cmake
++++ b/recomp_ui.cmake
+@@ -227,7 +227,9 @@ function(recomp_target_launcher_ui TGT)
+     elseif(RECOMP_UI_LANGUAGE)
+         recomp_target_launcher_language(${TGT} "${RECOMP_UI_LANGUAGE}")
+     endif()
+-    if(ANDROID)
++    if(ANDROID OR NINTENDO_SWITCH)
++        # Switch: Mesa/nouveau serves GLES2 through EGL, linked statically, so
++        # the ImGui backend needs no runtime GL loader (no dlopen on Horizon).
+         target_compile_definitions(${TGT} PRIVATE
+             LNG_GLES2=1
+             IMGUI_IMPL_OPENGL_ES2=1)
+@@ -244,7 +246,10 @@ function(recomp_target_launcher_ui TGT)
+     # than having to remember to link OpenGL itself — mirrors the standalone
+     # CMakeLists.txt. SDL is still the host's to provide (its provenance varies:
+     # vendored, find_package, etc.); GL is a uniform system lib, so it lives here.
+-    if(ANDROID)
++    if(NINTENDO_SWITCH)
++        # devkitPro portlibs: static Mesa. Order matters for static linking.
++        target_link_libraries(${TGT} PRIVATE GLESv2 EGL glapi drm_nouveau nx)
++    elseif(ANDROID)
+         find_library(RUI_GLES2_LIBRARY GLESv2 REQUIRED)
+         find_library(RUI_EGL_LIBRARY EGL REQUIRED)
+         find_library(RUI_LOG_LIBRARY log REQUIRED)
+@@ -268,7 +273,7 @@ function(recomp_target_launcher_ui TGT)
+     # remember, no missing-dependency failure.
+     if(WIN32)
+         target_link_libraries(${TGT} PRIVATE d2d1 dwrite windowscodecs ole32)
+-    elseif(NOT ANDROID)
++    elseif(NOT ANDROID AND NOT NINTENDO_SWITCH)
+         find_package(Freetype QUIET)
+         if(TARGET Freetype::Freetype)
+             target_compile_definitions(${TGT} PRIVATE RECOMP_UI_HAVE_FREETYPE=1)
+diff --git a/src/common/backends/imgui/launcher_imgui.cpp b/src/common/backends/imgui/launcher_imgui.cpp
+index 4a5a26c..47c717d 100644
+--- a/src/common/backends/imgui/launcher_imgui.cpp
++++ b/src/common/backends/imgui/launcher_imgui.cpp
+@@ -236,6 +236,33 @@ void scale_mouse_event(SDL_Event& e, float coords) {
+     }
+ }
+ 
++#if defined(__SWITCH__)
++/* One finger at a time, in logical units (the layout's coordinate space). */
++bool handle_switch_touch(const SDL_Event& e, const LauncherPlatform* p) {
++    static SDL_FingerID s_finger = -1;
++    if (e.type != SDL_FINGERDOWN && e.type != SDL_FINGERUP &&
++        e.type != SDL_FINGERMOTION)
++        return false;
++    if (e.type != SDL_FINGERDOWN && e.tfinger.fingerId != s_finger) return true;
++    if (e.type == SDL_FINGERDOWN && s_finger != -1) return true;
++    const float w = p && p->logical_w > 0 ? (float)p->logical_w : ImGui::GetIO().DisplaySize.x;
++    const float h = p && p->logical_h > 0 ? (float)p->logical_h : ImGui::GetIO().DisplaySize.y;
++    ImGuiIO& io = ImGui::GetIO();
++#if defined(IMGUI_VERSION_NUM) && IMGUI_VERSION_NUM >= 18950
++    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
++#endif
++    io.AddMousePosEvent(e.tfinger.x * w, e.tfinger.y * h);
++    if (e.type == SDL_FINGERDOWN) {
++        s_finger = e.tfinger.fingerId;
++        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
++    } else if (e.type == SDL_FINGERUP) {
++        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
++        s_finger = -1;
++    }
++    return true;
++}
++#endif
++
+ /* True where the SDL backend re-asserts the cursor from the global mouse
+  * state every frame (the same driver whitelist it uses). Elsewhere — Wayland —
+  * there is no global cursor and motion events are the only source, so asking
+@@ -1532,7 +1559,7 @@ void apply_scale(const LauncherTheme& th, float scale, const char* font_path,
+     style.WindowPadding  = ImVec2(th.spacing_lg, th.spacing_lg);
+     style.FramePadding   = ImVec2(th.spacing_md, th.spacing_sm);
+     style.ItemSpacing    = ImVec2(th.spacing_md, th.spacing_sm);
+-#if defined(__ANDROID__)
++#if defined(__ANDROID__) || defined(__SWITCH__)
+     style.TouchExtraPadding = ImVec2(5.0f, 5.0f);
+     style.ScrollbarSize = 24.0f;
+ #endif
+@@ -3790,11 +3817,15 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+         // no measuring pass over the labels is needed and the card reads as a
+         // grid flush on both sides.
+         const float cb = ImGui::GetFrameHeight();   // a checkbox is square
++#if !defined(__SWITCH__)   /* one fixed full-screen window */
+         row_window_scale(m, th);
++#endif
+         // Universal fullscreen row (every console; Off/Borderless/Exclusive,
+         // the legacy launcher's vocabulary). Sits right under Window scale,
+         // matching the old Display panel order.
++#if !defined(__SWITCH__)   /* one fixed full-screen window */
+         row_fullscreen(m, th);
++#endif
+         if (m->num_display_layouts > 0) {
+             row_label_right("Screen layout", th, px(180));
+             ImGui::PushID("screen_layout");
+@@ -3897,7 +3928,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+         if (ImGui::Button(ui_text(launcher_model_window_size_label(m)), ImVec2(px(SETTINGS_CTRL_W), px(30))))
+             launcher_model_cycle_window_size(m);
+     } else {
++#if !defined(__SWITCH__)   /* one fixed full-screen window */
+         row_window_scale(m, th);
++#endif
+     }
+ 
+     // NES module rows can appear on this branch too (has_renderer puts NES
+@@ -4001,7 +4034,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+     // Universal fullscreen row (every console — no longer gated on the
+     // vestigial has_fullscreen_toggle). A tri-state dropdown, so Exclusive is
+     // both reachable and visible without pressing through the other two.
++#if !defined(__SWITCH__)   /* one fixed full-screen window */
+     row_fullscreen(m, th);
++#endif
+     if (m->num_display_layouts > 0) {
+         /* Wider than the shared column: these labels come from the HOST, not
+          * from a vocabulary this file owns, and a button (unlike a combo) does
+@@ -13828,6 +13863,9 @@ std::string asset(const char* rel) {
+ 
+ #if defined(__ANDROID__)
+     const char* base = SDL_AndroidGetInternalStoragePath();
++#elif defined(__SWITCH__)
++    /* The host anchors cwd to the NRO's folder, where assets/ is installed. */
++    const char* base = nullptr;
+ #else
+     const char* base = SDL_GetBasePath();
+ #endif
+@@ -13872,7 +13910,7 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+      * KEY would have to be physically held, and the window would not have
+      * focus to receive it. */
+     s_pad_nav_armed = false;
+-#if defined(__ANDROID__)
++#if defined(__ANDROID__) || defined(__SWITCH__)
+     io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
+ #endif
+     io.IniFilename = nullptr;
+@@ -14064,6 +14102,14 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+             default:
+                 break;
+             }
++#if defined(__SWITCH__)
++            /* The handheld touchscreen arrives as SDL finger events
++             * (normalized 0..1; synthetic mouse events are off, see
++             * launcher_platform_sdl2.c). The first finger down drives ImGui as
++             * a touch-sourced pointer, so taps press and pad navigation stays
++             * as it was. */
++            if (handle_switch_touch(ev, p)) continue;
++#endif
+             LNG_ImplSDL_ProcessEvent(&ev);
+         } while (SDL_PollEvent(&ev));
+ 
+diff --git a/src/common/launcher_debug.c b/src/common/launcher_debug.c
+index f56e631..806280d 100644
+--- a/src/common/launcher_debug.c
++++ b/src/common/launcher_debug.c
+@@ -178,6 +178,7 @@ void launcher_debug_step(LauncherPlatform* p, LauncherModel* m) {
+         else if (strcmp(v, "controller") == 0) launcher_model_set_view(m, LNG_VIEW_CONTROLLER);
+         else if (strcmp(v, "assist_tools") == 0) launcher_model_set_view(m, LNG_VIEW_ASSIST_TOOLS);
+         else if (strcmp(v, "credits") == 0) launcher_model_set_view(m, LNG_VIEW_CREDITS);
++        else if (strcmp(v, "mods") == 0) launcher_model_set_view(m, LNG_VIEW_MODS);
+         /* The LAN-vs-online fork. Reachable only by clicking NETPLAY on the
+          * dashboard, which made it the one netplay page a screenshot script
+          * could not open. */
+diff --git a/src/common/launcher_files.c b/src/common/launcher_files.c
+index 0272a7e..94f9a33 100644
+--- a/src/common/launcher_files.c
++++ b/src/common/launcher_files.c
+@@ -660,7 +660,10 @@ static int linux_pick_folder(const char* title, char* out, size_t out_cap) {
+ #endif /* __linux__ */
+ 
+ bool launcher_native_file_picker_available(void) {
+-#if defined(__linux__)
++#if defined(__SWITCH__)
++    /* No native chooser on the console: every Browse uses the in-app one. */
++    return false;
++#elif defined(__linux__)
+     return linux_have_cmd("zenity") || linux_have_cmd("kdialog");
+ #else
+     return true;
+diff --git a/src/common/launcher_platform_sdl2.c b/src/common/launcher_platform_sdl2.c
+index 2595ce3..97f3ae2 100644
+--- a/src/common/launcher_platform_sdl2.c
++++ b/src/common/launcher_platform_sdl2.c
+@@ -201,6 +201,11 @@ bool launcher_platform_open(LauncherPlatform* p, const char* title,
+     // either way, and forcing EGL would also demand libGLESv2.so.2, which not
+     // every Linux install has.
+     SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
++#endif
++#if defined(__SWITCH__)
++    /* The touchscreen is fed to ImGui as touch (launcher_imgui.cpp); a
++     * synthesized mouse on top of it would press every control twice. */
++    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+ #endif
+     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER |
+                  SDL_INIT_SENSOR) != 0) {   // SDL2: 0 == success
+@@ -251,7 +256,7 @@ bool launcher_platform_open(LauncherPlatform* p, const char* title,
+     /* Automated launcher checks must not steal the user's desktop/focus. */
+     const bool test_hidden = getenv("LNG_SCRIPT") && getenv("LNG_TEST_HIDDEN");
+     if (test_hidden) window_flags |= SDL_WINDOW_HIDDEN;
+-#if defined(__ANDROID__)
++#if defined(__ANDROID__) || defined(__SWITCH__)
+     window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_BORDERLESS;
+ #endif
+     p->window = SDL_CreateWindow(title ? title : "Launcher",
+@@ -287,7 +292,9 @@ bool launcher_platform_open(LauncherPlatform* p, const char* title,
+     // narrow one-column breakpoint on a 150% desktop — so this asks for the
+     // pixels the requested logical size really needs, and keeps the result
+     // reachable on displays that cannot show them all.
++#if !defined(__SWITCH__)   /* one full-screen layer: nothing to size or place */
+     fit_window_to_display(p, logical_w, logical_h);
++#endif
+     launcher_boot_timing_mark("rui:platform_open:window+gl_ready");
+     return true;
+ }
+@@ -321,6 +328,11 @@ void launcher_platform_set_icon(LauncherPlatform* p, const char* image_path) {
+ static float forced_display_scale(void) {
+     const char* fs = getenv("LNG_FORCE_SCALE");
+     float v;
++#if defined(__SWITCH__)
++    /* A 6-7" panel at 720p, or a TV across the room: lay the UI out in
++     * 1024x576 logical units and draw it 1.25x. LNG_FORCE_SCALE still wins. */
++    if (!fs || !fs[0]) return 1.25f;
++#endif
+     if (!fs || !fs[0]) return 0.0f;
+     v = (float)atof(fs);
+     return (v > 1.0f && v <= 4.0f) ? v : 0.0f;
+diff --git a/src/common/launcher_sdlcompat.h b/src/common/launcher_sdlcompat.h
+index 597ee10..e6bac40 100644
+--- a/src/common/launcher_sdlcompat.h
++++ b/src/common/launcher_sdlcompat.h
+@@ -12,7 +12,7 @@
+ // ---- map SDL3 spellings onto SDL2 -----------------------------------------
+ 
+ // GL header (Android uses GLES; desktop SDL2 uses the system OpenGL header).
+-#if defined(__ANDROID__)
++#if defined(__ANDROID__) || defined(__SWITCH__)
+ #include <SDL_opengles2.h>
+ #else
+ #include <SDL_opengl.h>
+diff --git a/src/common/launcher_theme.h b/src/common/launcher_theme.h
+index 317e920..94ce863 100644
+--- a/src/common/launcher_theme.h
++++ b/src/common/launcher_theme.h
+@@ -9,6 +9,8 @@
+ #ifndef LAUNCHER_NG_THEME_H
+ #define LAUNCHER_NG_THEME_H
+ 
++#include <stdlib.h>   // getenv (LNG_HIGH_CONTRAST)
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -283,7 +285,7 @@ static inline LauncherTheme launcher_theme_gbc(void) {
+ // 64, "nes" -> Nintendo Entertainment System, "genesis" -> Sega Genesis;
+ // anything else -> default CRT). Note the "gb*" order: match "gba" and "gbc"
+ // (3rd char) BEFORE the bare "gb" fallback.
+-static inline LauncherTheme launcher_theme_by_name(const char* name) {
++static inline LauncherTheme launcher_theme_by_name_base(const char* name) {
+     if (name && (name[0] == 'p' || name[0] == 'P') &&
+         (name[1] == 's' || name[1] == 'S'))
+         return launcher_theme_psx();
+@@ -314,6 +316,42 @@ static inline LauncherTheme launcher_theme_by_name(const char* name) {
+     return launcher_theme_default();
+ }
+ 
++// High-contrast pass for small/handheld screens and couch distance (Nintendo
++// Switch by default; LNG_HIGH_CONTRAST=1 previews it on a desktop). Keeps each
++// console's palette and accent, but lifts secondary text, separates controls
++// from the panels they sit on, makes hover/focus unmistakable and enlarges the
++// small type. The CRT scanlines are dropped: on a 720p panel they only dim.
++static inline void launcher_theme_high_contrast(LauncherTheme* t) {
++    const LngColor a = t->accent;
++    t->text            = lng_rgba(1.0f, 1.0f, 1.0f, 1.0f);
++    t->text_muted      = lng_rgba(0.780f, 0.808f, 0.875f, 1.0f); // #C7CEDF
++    t->panel           = lng_rgba(0.110f, 0.137f, 0.204f, 1.0f); // #1C2334
++    t->panel_hovered   = lng_rgba(0.169f, 0.208f, 0.306f, 1.0f); // #2B354E
++    t->control         = lng_rgba(0.208f, 0.255f, 0.376f, 1.0f); // #354160
++    t->control_hovered = lng_rgba(a.r * 0.55f + 0.10f, a.g * 0.55f + 0.10f,
++                                  a.b * 0.55f + 0.10f, 1.0f);    // accent-tinted
++    t->border          = lng_rgba(0.431f, 0.494f, 0.651f, 1.0f); // #6E7EA6
++    t->focus_ring      = lng_rgba(0.400f, 1.000f, 1.000f, 1.0f); // bright cyan
++    t->focus_ring_width = 4.0f;
++    t->font_body  += 2.0f;
++    t->font_small += 4.0f;
++    t->row_height += 4.0f;
++    t->scanlines  = 0;
++}
++
++static inline LauncherTheme launcher_theme_by_name(const char* name) {
++    LauncherTheme t = launcher_theme_by_name_base(name);
++#if defined(__SWITCH__)
++    launcher_theme_high_contrast(&t);
++#else
++    {
++        const char* hc = getenv("LNG_HIGH_CONTRAST");
++        if (hc && hc[0] == '1') launcher_theme_high_contrast(&t);
++    }
++#endif
++    return t;
++}
++
+ #ifdef __cplusplus
+ }
+ #endif

@@ -30,6 +30,31 @@ static unsigned word(size_t a) { return range(a, 2) ? rom[a] | (rom[a + 1] << 8)
 static size_t lorom(unsigned a) { return ((a >> 16) & 127) * 0x8000u + (a & 0x7fff); }
 static unsigned ram_word(const uint8_t *r, unsigned a) { return r[a] | (r[a + 1] << 8); }
 
+
+/* Rows of the custom renderer may run on several threads (mmx_renderer.c).
+ * Sprite assets are built on first use, so their builders are serialized;
+ * once built they are only read. Recursive: builders call each other. */
+#if defined(__SWITCH__) || defined(__linux__)
+#include <pthread.h>
+static pthread_mutex_t s_assets_mutex;
+static pthread_once_t s_assets_once = PTHREAD_ONCE_INIT;
+static void assets_lock_init(void) {
+  pthread_mutexattr_t attr;
+  pthread_mutexattr_init(&attr);
+  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&s_assets_mutex, &attr);
+  pthread_mutexattr_destroy(&attr);
+}
+static void assets_lock(void) {
+  pthread_once(&s_assets_once, assets_lock_init);
+  pthread_mutex_lock(&s_assets_mutex);
+}
+static void assets_unlock(void) { pthread_mutex_unlock(&s_assets_mutex); }
+#else
+static void assets_lock(void) {}
+static void assets_unlock(void) {}
+#endif
+
 void MmxRenderAssetsSetRom(const uint8_t *bytes, size_t size) {
   if (rom == bytes && rom_size == size) return;
   rom = bytes; rom_size = size;
@@ -42,7 +67,7 @@ void MmxRenderAssetsSetRom(const uint8_t *bytes, size_t size) {
   memset(charged_buster_ready,0,sizeof(charged_buster_ready));
   memset(player_weapon_ready,0,sizeof(player_weapon_ready));
 }
-const MmxSpriteAsset *MmxRenderAssetsWeaponX(unsigned weapon, bool body) {
+static const MmxSpriteAsset *MmxRenderAssetsWeaponX_unlocked(unsigned weapon, bool body) {
   if (weapon>8 || !rom) return NULL;
   if (player_weapon_ready[weapon])
     return player_weapon_ready[weapon]==1 ? &player_weapons[weapon][body?1:0] : NULL;
@@ -81,7 +106,7 @@ const MmxSpriteAsset *MmxRenderAssetsWeaponX(unsigned weapon, bool body) {
   }
   player_weapon_ready[weapon]=1;return body?actor:art;
 }
-const MmxSpriteAsset *MmxRenderAssetsChargedBuster(unsigned group,unsigned pose) {
+static const MmxSpriteAsset *MmxRenderAssetsChargedBuster_unlocked(unsigned group,unsigned pose) {
   if (!rom || (group!=0x0e && group!=0x9e) ||
       pose>=(group==0x0e ? 21 : 12) || (pose>=8 && pose<=11 && group==0x0e) ||
       (group==0x9e && pose>=8 && pose<=10)) return NULL;
@@ -122,7 +147,7 @@ const MmxSpriteAsset *MmxRenderAssetsChargedBuster(unsigned group,unsigned pose)
   art->attributes=6;art->live_colors=true;charged_buster_ready[kind][pose]=true;
   return art;
 }
-bool MmxRenderAssetsStingPalette(unsigned phase,uint16_t colors[16]) {
+static bool MmxRenderAssetsStingPalette_unlocked(unsigned phase,uint16_t colors[16]) {
   if(!rom || !colors || phase>14 || (phase&1)) return false;
   size_t list=0x30000+(word(0x30133+0x1a0+phase)&0x7fff);
   bool found=false;
@@ -138,7 +163,7 @@ bool MmxRenderAssetsStingPalette(unsigned phase,uint16_t colors[16]) {
   }
   return false;
 }
-const MmxSpriteAsset *MmxRenderAssetsTeleportX(unsigned pose) {
+static const MmxSpriteAsset *MmxRenderAssetsTeleportX_unlocked(unsigned pose) {
   unsigned index = pose == 0 ? 7 : pose >= 0x3c && pose <= 0x42 ? pose - 0x3c : 8;
   if (index >= 8 || !rom) return NULL;
   if (!teleport_x_ready) {
@@ -217,7 +242,7 @@ static bool tiles(unsigned id, uint8_t out[8192]) {
   }
   return false;
 }
-const MmxSpriteAsset *MmxRenderAssetsCaptiveZero(void) {
+static const MmxSpriteAsset *MmxRenderAssetsCaptiveZero_unlocked(void) {
   if (captive_zero_ready) return captive_zero_ready == 1 ? &captive_zero : NULL;
   captive_zero_ready = 2;
   uint8_t decoded[65536];
@@ -299,12 +324,12 @@ static void stage_assets(unsigned stage, unsigned section) {
     else if (sprite_resource[animation] != resource) sprite_resource[animation] = 254;
   }
 }
-const MmxSpriteAsset *MmxRenderAssetsSprite(unsigned stage, unsigned section, unsigned sprite) {
+static const MmxSpriteAsset *MmxRenderAssetsSprite_unlocked(unsigned stage, unsigned section, unsigned sprite) {
   stage_assets(stage, section);
   unsigned id = sprite < 256 ? sprite_resource[sprite] : 255;
   return id < 254 && ready[id] == 1 ? &assets[id] : NULL;
 }
-const MmxSpriteAsset *MmxRenderAssetsObjectSprite(const uint8_t ram[0x20000],
+static const MmxSpriteAsset *MmxRenderAssetsObjectSprite_unlocked(const uint8_t ram[0x20000],
                                                 unsigned object, unsigned animation) {
   if (!ram) return NULL;
   /* $81:9C70/$81:F0D7 use the dash body's flame/spark tiles ($0D..0F),
@@ -474,7 +499,7 @@ const MmxSpriteAsset *MmxRenderAssetsObjectSprite(const uint8_t ram[0x20000],
       (object & 63) == 0x28 && MmxWidePolicy_IsBossEncounter(ram[object + 10])) return NULL;
   return asset;
 }
-bool MmxRenderAssetsRideArmorPalettePending(const uint8_t ram[0x20000], const uint16_t colors[16]) {
+static bool MmxRenderAssetsRideArmorPalettePending_unlocked(const uint8_t ram[0x20000], const uint16_t colors[16]) {
   if (!ram || !colors || ram[0x1f7a] != 8) return false;
   stage_assets(ram[0x1f7a], ram[0x1f08]);
   /* Section 4 replaces resource $4A's cave palette in OBJ slot 5 with
@@ -533,26 +558,27 @@ static size_t background_list(size_t base, unsigned phase) {
   if (end < start || phase >= (end - start) / 2) return rom_size;
   return base + word(base + start + phase * 2);
 }
+static void build_background_chr(unsigned phase) {
+  bg_chr_ready[phase] = true;
+  memset(bg_chr_valid[phase], 0, sizeof(bg_chr_valid[phase]));
+  size_t p = background_list(0x321d5, phase);
+  /* B436's nine-byte DMA records: byte count, VRAM word destination,
+   * ROM long source, palette descriptor. BG data is uncompressed. */
+  for (unsigned guard = 0; guard < 32 && range(p, 9) && word(p); ++guard, p += 9) {
+    unsigned count = word(p), dest = word(p + 2) * 2;
+    size_t source = lorom(word(p + 4) | (rom[p + 6] << 16));
+    if ((dest & 31) || (count & 31) || dest + count > 65536 || !range(source, count)) continue;
+    memcpy(bg_chr[phase] + dest, rom + source, count);
+    memset(bg_chr_valid[phase] + dest / 32, 1, count / 32);
+  }
+}
 const uint8_t *MmxRenderAssetsBackgroundTile(const uint8_t ram[0x20000],
                                             int world_x, unsigned vram_word) {
   if (!ram || (ram[0x1f7a] != 0 && ram[0x1f7a] != 1) || world_x < 0 || world_x >= 8192 || vram_word >= 0x8000 || !prepare_background(ram)) return NULL;
   unsigned phase = bg_phase[0][world_x];
   /* RAM records the requested phase before DMA completes. Use private
    * resources even when it matches, so margin art cannot briefly regress. */
-  if (!bg_chr_ready[phase]) {
-    bg_chr_ready[phase] = true;
-    memset(bg_chr_valid[phase], 0, sizeof(bg_chr_valid[phase]));
-    size_t p = background_list(0x321d5, phase);
-    /* B436's nine-byte DMA records: byte count, VRAM word destination,
-     * ROM long source, palette descriptor. BG data is uncompressed. */
-    for (unsigned guard = 0; guard < 32 && range(p, 9) && word(p); ++guard, p += 9) {
-      unsigned count = word(p), dest = word(p + 2) * 2;
-      size_t source = lorom(word(p + 4) | (rom[p + 6] << 16));
-      if ((dest & 31) || (count & 31) || dest + count > 65536 || !range(source, count)) continue;
-      memcpy(bg_chr[phase] + dest, rom + source, count);
-      memset(bg_chr_valid[phase] + dest / 32, 1, count / 32);
-    }
-  }
+  if (!bg_chr_ready[phase]) build_background_chr(phase);
   return bg_chr_valid[phase][vram_word / 16] ? bg_chr[phase] + vram_word * 2 : NULL;
 }
 static const MmxBackgroundPalette *background_palette(unsigned phase) {
@@ -625,4 +651,67 @@ unsigned MmxRenderAssetsDeathPaletteFade(const uint8_t ram[0x20000], const uint1
     if (checked && match) return fade;
   }
   return 0;
+}
+
+/* The per-pixel background lookups build their caches on first use. Rows can
+ * be composed on several threads, so build every phase here instead, once per
+ * stage, on the thread that prepares the frame. Each phase is derived from the
+ * ROM alone, so this yields exactly what the lazy path would have. */
+void MmxRenderAssetsPrepareFrame(const uint8_t ram[0x20000]) {
+  if (!ram || !prepare_background(ram)) return;
+  for (unsigned phase = 0; phase < 16; ++phase) {
+    if (!bg_chr_ready[phase]) build_background_chr(phase);
+    (void)background_palette(phase);
+  }
+}
+
+/* Locked entry points for the lazily built sprite assets (see assets_lock). */
+const MmxSpriteAsset *MmxRenderAssetsWeaponX(unsigned weapon, bool body) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsWeaponX_unlocked(weapon, body);
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsChargedBuster(unsigned group,unsigned pose) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsChargedBuster_unlocked(group, pose);
+  assets_unlock();
+  return result;
+}
+bool MmxRenderAssetsStingPalette(unsigned phase,uint16_t colors[16]) {
+  assets_lock();
+  bool result = MmxRenderAssetsStingPalette_unlocked(phase, colors);
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsTeleportX(unsigned pose) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsTeleportX_unlocked(pose);
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsCaptiveZero(void) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsCaptiveZero_unlocked();
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsSprite(unsigned stage, unsigned section, unsigned sprite) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsSprite_unlocked(stage, section, sprite);
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsObjectSprite(const uint8_t ram[0x20000],
+                                                unsigned object, unsigned animation) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsObjectSprite_unlocked(ram, object, animation);
+  assets_unlock();
+  return result;
+}
+bool MmxRenderAssetsRideArmorPalettePending(const uint8_t ram[0x20000], const uint16_t colors[16]) {
+  assets_lock();
+  bool result = MmxRenderAssetsRideArmorPalettePending_unlocked(ram, colors);
+  assets_unlock();
+  return result;
 }
