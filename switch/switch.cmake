@@ -12,7 +12,7 @@
 set(MMX_SWITCH_APP_TITLE "Mega Man X Recompiled" CACHE STRING "NRO title")
 set(MMX_SWITCH_APP_AUTHOR "Thorhax" CACHE STRING "NRO author" FORCE)
 # The Switch port's own release number (the upstream game is PROJECT_VERSION).
-set(MMX_SWITCH_APP_VERSION "1.0.0" CACHE STRING "NRO version" FORCE)
+set(MMX_SWITCH_APP_VERSION "1.0.1" CACHE STRING "NRO version" FORCE)
 option(MMX_SWITCH_LAUNCHER "Include the Dear ImGui launcher (Mods, Controls, Settings)" ON)
 set(MMX_SWITCH_ICON "${CMAKE_CURRENT_LIST_DIR}/icon.jpg" CACHE FILEPATH "NRO icon (256x256 JPEG)")
 
@@ -36,6 +36,17 @@ function(mmx_switch_target target)
         target_include_directories(${target} PRIVATE ${RECOMP_UI_ROOT}/src)
     endif()
     target_link_libraries(${target} PRIVATE nx m)
+    # The custom renderer (widescreen, Zero, X2/X3 weapons) is the hottest code
+    # on the console. -O3 plus LTO across it and the helpers it calls per pixel
+    # measured ~20% faster than the toolchain's -O2, with identical output.
+    # Only these files: the generated program and the runtime keep -O2.
+    set(_mmx_hot_sources
+        src/mmx_renderer.c src/mmx_render_assets.c src/mmx_display.c
+        src/mmx_wide_policy.c src/mmx_zero.c src/mmx_weapons.c
+        src/mmx_weapon_combat.c src/mmx_coop_view.c)
+    set_source_files_properties(${_mmx_hot_sources} PROPERTIES
+        COMPILE_OPTIONS "-O3;-flto")
+    target_link_options(${target} PRIVATE -flto=4 -O3)
     set_target_properties(${target} PROPERTIES OUTPUT_NAME "MegaManX" SUFFIX ".elf")
 
     nx_generate_nacp(${target}.nacp

@@ -7,6 +7,9 @@
 #include "mmx_weapon_combat.h"
 #include "mmx_coop_view.h"
 #include <math.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 /* Mode-1 decode/composition follows SuperMetroidRecomp's sm_renderer.c.
  * The PPU remains native. Immutable raster snapshots are the only inputs to
@@ -1255,6 +1258,16 @@ static void coop_hud_row(const Ppu *ppu,const Raster *r,int y,MmxRenderView view
 }
 /* Everything a row reads that MmxRendererDraw prepares once per frame.
  * Rows only read it, so they can be composed in any order, on any thread. */
+static inline int lowest_bit(uint64_t bits) {
+#if defined(_MSC_VER)
+  unsigned long index;
+  _BitScanForward64(&index, bits);
+  return (int)index;
+#else
+  return __builtin_ctzll(bits);
+#endif
+}
+
 typedef struct DrawCtx {
   uint32_t *out;
   MmxRenderView view;
@@ -1270,6 +1283,10 @@ typedef struct DrawCtx {
   const MmxSpriteAsset *waiting_zero;
   const MmxSpriteAsset *piece_assets[MAX_PIECES];
   int16_t crystal_ripple[224];
+  /* Per piece: whether, and which, OAM slots 16..127 of frame.lines[0] hold
+   * its exact record (x, y, attributes). */
+  bool piece_oam_match[MAX_PIECES];
+  uint64_t piece_oam_slots[MAX_PIECES][2];
 } DrawCtx;
 static DrawCtx s_draw;
 
@@ -1321,6 +1338,11 @@ static void draw_row(const DrawCtx *c, int y) {
   }
   bool replaced[128] = {false};
   bool zero_drawn[2] = {false,false};
+  /* OAM normally holds still for a whole frame, so a row whose OAM equals the
+   * first line's reuses the per-piece slot matches DrawCtx precomputed. */
+  const bool oam_is_reference =
+      !memcmp(r->oam, frame.lines[0].oam, sizeof(r->oam)) &&
+      !memcmp(r->high_oam, frame.lines[0].high_oam, sizeof(r->high_oam));
   for (int i = (int)piece_count - 1; i >= 0; --i) {
     Piece s = pieces[i]; const MmxSpriteAsset *asset = piece_assets[i];
     bool frozen_enemy=stage && (MmxWeaponsFrozenEnemy(&frame_weapon_combat,s.object) ||
@@ -1351,12 +1373,22 @@ static void draw_row(const DrawCtx *c, int y) {
     bool zero_armor = zero && (s.object == 0xc38 || s.object == 0xc58 || s.object == 0xc78 ||
         (zero_menu && (s.object == 0x1928 || s.object == 0x1948 || s.object == 0x1968)));
     bool oam_match = false;
-    if (g_mmx_render_asset_repairs || coop_buster || zero_body || zero_armor || zero_charge || swap_actor || red_ready || red_death || triad_x_body || triad_armor || frozen_enemy) for (int slot = 16; slot < 128; ++slot) {
-      unsigned pos = r->oam[slot * 2], hi = r->high_oam[slot / 4] >> (slot % 4 * 2);
-      int ox = (pos & 255) | ((hi & 1) << 8); if (ox >= 256) ox -= 512;
-      if (ox == s.x && (pos >> 8) == ((unsigned)s.y & 255) && r->oam[slot * 2 + 1] == s.attr) {
-        oam_match = true;
-        replaced[slot] = true; center = true;
+    if (g_mmx_render_asset_repairs || coop_buster || zero_body || zero_armor || zero_charge || swap_actor || red_ready || red_death || triad_x_body || triad_armor || frozen_enemy) {
+      if (oam_is_reference) {
+        /* Same OAM as the frame's first line: the match was found once. */
+        if (c->piece_oam_match[i]) {
+          oam_match = true; center = true;
+          for (int w = 0; w < 2; ++w)
+            for (uint64_t bits = c->piece_oam_slots[i][w]; bits; bits &= bits - 1)
+              replaced[w * 64 + lowest_bit(bits)] = true;
+        }
+      } else for (int slot = 16; slot < 128; ++slot) {
+        unsigned pos = r->oam[slot * 2], hi = r->high_oam[slot / 4] >> (slot % 4 * 2);
+        int ox = (pos & 255) | ((hi & 1) << 8); if (ox >= 256) ox -= 512;
+        if (ox == s.x && (pos >> 8) == ((unsigned)s.y & 255) && r->oam[slot * 2 + 1] == s.attr) {
+          oam_match = true;
+          replaced[slot] = true; center = true;
+        }
       }
     }
     /* Match original OAM before reprojection. HUD and native script panels
@@ -1756,6 +1788,24 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   c->waiting_count = waiting_count; c->waiting_zero = waiting_zero;
   memcpy(c->piece_assets, piece_assets, piece_count * sizeof(*piece_assets));
   memcpy(c->crystal_ripple, crystal_ripple, sizeof(c->crystal_ripple));
+  {
+    /* The same slot scan the rows run, done once against the first line.
+     * Rows with any other OAM keep scanning their own (draw_row). */
+    const Raster *r0 = &frame.lines[0];
+    for (unsigned i = 0; i < piece_count; ++i) {
+      const Piece *s = &pieces[i];
+      c->piece_oam_match[i] = false;
+      c->piece_oam_slots[i][0] = c->piece_oam_slots[i][1] = 0;
+      for (int slot = 16; slot < 128; ++slot) {
+        unsigned pos = r0->oam[slot * 2], hi = r0->high_oam[slot / 4] >> (slot % 4 * 2);
+        int ox = (pos & 255) | ((hi & 1) << 8); if (ox >= 256) ox -= 512;
+        if (ox == s->x && (pos >> 8) == ((unsigned)s->y & 255) && r0->oam[slot * 2 + 1] == s->attr) {
+          c->piece_oam_match[i] = true;
+          c->piece_oam_slots[i][slot / 64] |= 1ull << (slot % 64);
+        }
+      }
+    }
+  }
   /* Background caches are built here, single-threaded: rows only read them. */
   if (stage && g_mmx_render_asset_repairs) MmxRenderAssetsPrepareFrame(frame.ram);
   render_rows();

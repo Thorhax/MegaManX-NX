@@ -1,6 +1,6 @@
 # Mega Man X Recompiled for Nintendo Switch (MegaManX-NX)
 
-**Version:** 1.0.0
+**Version:** 1.0.1
 **Author (Switch port):** Thorhax
 **Target:** Nintendo Switch homebrew (Atmosphère / Horizon OS)
 
