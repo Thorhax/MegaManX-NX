@@ -23,6 +23,8 @@
 #include "mmx_coop_view.h"
 #include "netplay/snes_netplay.h"
 #include "host_paths.h"
+#include "snes_savestate_menu.h"
+#include "snes_rewind.h"
 #include <ctype.h>
 
 #ifndef MMX_VARIANT_JP
@@ -68,7 +70,44 @@ bool MmxDisplay_IsWidescreenActive(void) {
 }
 int MmxDisplay_GetCurrentFrameWidth(void) { return snesrecomp_desktop_frame_width(); }
 
+#if defined(__SWITCH__)
+#include <switch.h>
+#include "snes_osd.h"
+/* Hold ZL + ZR and click the right stick: cycle the renderer's optimizations
+ * off one at a time, live, so a visual difference on the console can be
+ * pinned to one of them. A debugging aid; normal play never needs it. */
+static void MmxRenderModeHotkey(void) {
+  static PadState pad;
+  static bool pad_ready;
+  static unsigned mode;
+  static const char *const kModes[] = {
+    "Render 0: all optimizations",
+    "Render 1: native lines drawn (no skip)",
+    "Render 2: fast paths off (VRAM/OAM reuse, plain BG, colour memo)",
+    "Render 3: single-threaded",
+    "Render 4: everything off",
+  };
+  if (!pad_ready) {
+    padInitializeDefault(&pad);
+    pad_ready = true;
+  }
+  padUpdate(&pad);
+  const u64 down = padGetButtonsDown(&pad), held = padGetButtons(&pad);
+  const u64 combo = HidNpadButton_ZL | HidNpadButton_ZR | HidNpadButton_StickR;
+  if (!(down & HidNpadButton_StickR) || (held & combo) != combo) return;
+  mode = (mode + 1) % (sizeof(kModes) / sizeof(kModes[0]));
+  g_mmx_native_raster = mode == 1 || mode == 4;
+  g_mmx_render_fast_paths = !(mode == 2 || mode == 4);
+  g_mmx_render_threads = !(mode == 3 || mode == 4);
+  snes_osd_push(kModes[mode], 3000);
+  fprintf(stderr, "[mmx-renderer] %s\n", kModes[mode]);
+}
+#endif
+
 static void MmxBeforeFrame(void) {
+#if defined(__SWITCH__)
+  MmxRenderModeHotkey();
+#endif
 #if SNESRECOMP_NET
   MmxCoopViewsSetOnline(snes_netplay_active() && MmxCoopEnabled() && MmxCoopViewsIndependent());
   MmxRendererSetPeerView(MmxCoopViewsOnline()?snes_netplay_local_slot():-1);
@@ -126,6 +165,14 @@ static int MmxDrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
       memcpy(output + y * w + (w - 256) / 2, field + y * 256 * 4, 256 * 4);
   }
   RtlWidescreenPresent(dst, pitch, (const uint8_t *)output, w, h);
+  /* Lines the custom renderer composed were never drawn natively
+   * (MmxDrawPpuFrame), so the host's thumbnails come from this frame's
+   * native-width centre instead of the PPU field. */
+  if (g_ppu_frame_skipped_lines && w >= 256) {
+    const uint32_t *centre = output + (w - 256) / 2;
+    snes_savestate_menu_note_frame_rows(centre, 256, h, w);
+    snes_rewind_note_framebuffer_rows(centre, 256, h, w);
+  }
   return 1;
 }
 static void MmxViewport(int w, int h, int dw, int dh, SnesDisplayViewport *view) {

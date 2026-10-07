@@ -297,3 +297,13 @@ bool MmxWidePolicy_SpawnRecordAllowed(uint8_t stage, uint8_t kind,
 
   return native_pass ? kind != 3 : kind == 3;
 }
+
+bool MmxWidePolicy_EnemyGraphicsResident(const uint8_t ram[0x20000],
+                                         const uint8_t *resource_table,
+                                         uint8_t object_id) {
+  if (!ram || !resource_table || !object_id) return true;
+  /* $82:827D: X = $86:A5E5[(id - 1) * 2]; +$18 = $7F:8200,X; +$11 = $7F:8300,X.
+   * Both read 0 until the stage's graphics event has loaded the resource. */
+  const uint8_t resource = resource_table[(object_id - 1) * 2 + 1];
+  return ram[0x18200 + resource] != 0 || ram[0x18300 + resource] != 0;
+}

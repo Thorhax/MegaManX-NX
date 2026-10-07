@@ -391,7 +391,7 @@ void MmxRendererCaptureLine(const Ppu *p, unsigned line) {
   /* Copying 64 KiB of VRAM for every one of 224 lines was ~15 MB of memcpy a
    * frame -- the largest cost of the custom renderer on a Switch. */
   static uint32_t s_vram_writes;
-  if (line == 1 || p->vramWriteCount != s_vram_writes) {
+  if (line == 1 || p->vramWriteCount != s_vram_writes || !g_mmx_render_fast_paths) {
     memcpy(r->vram, p->vram, sizeof(r->vram));
     r->vram_line = (int16_t)(line - 1);
     s_vram_writes = p->vramWriteCount;
@@ -399,6 +399,24 @@ void MmxRendererCaptureLine(const Ppu *p, unsigned line) {
     r->vram_line = frame.lines[line - 2].vram_line;
   }
   ++frame.captured;
+}
+/* Whether this frame's scene composes mode-1 lines itself: the per-frame half
+ * of MmxRendererDraw's fallback test, computed once when line 1 is captured.
+ * Every input (frame.ram, frame_zero, frame_weapons) is latched by
+ * MmxRendererBeginFrame/MmxRendererCoopFrame before the first capture. */
+static bool s_scene_custom;
+bool MmxRendererCapturedLineIsCustom(const Ppu *ppu, unsigned line) {
+  if (!ppu || line < 1 || line > 224 || frame.captured != line) return false;
+  if (line == 1) {
+    const bool zero_menu = zero_weapons_menu();
+    const bool menu = zero_menu || MmxWeaponsMenuVisible(frame.ram);
+    const bool zero_title = zero_title_menu();
+    const bool stage = MmxWidePolicy_IsStageScene(frame.ram) && !menu;
+    s_scene_custom = stage || menu || zero_title;
+  }
+  /* MmxRendererDraw copies frame.stock for (bgmode & 7) != 1 or a scene
+   * that is none of stage/menu/title; every other line it composes. */
+  return s_scene_custom && (ppu->bgmode & 7) == 1;
 }
 bool MmxRendererEndFrame(const uint32_t stock[256 * 224]) {
   if (!stock || frame.captured != 224) return false;
@@ -630,6 +648,58 @@ static int weapon_menu_icon(int x, int y) {
   if (px < 0 || py < 0 || px >= pose->width || py >= pose->height) return -1;
   unsigned pixel = pose->pixels[py * pose->width + px];
   return pixel ? colors[pixel] : -1;
+}
+/* The plain SNES tile lookup background() reduces to for a pixel inside the
+ * native 256 columns when no camera offset applies (view_dx/view_dy == 0) and
+ * the weapon menu is not drawn over BG1: no stage remap, door or ROM-asset
+ * substitution can take effect there (the asset lookups decline a negative
+ * world X), so the private colour is never set. Row constants are hoisted and
+ * the tilemap entry is reused across the pixels of one tile.
+ * It must stay exactly equal to background() for those pixels. */
+typedef struct PlainBg {
+  const uint16_t *vram;
+  unsigned size, shift, bpp, sc, tile_base, prio_low, prio_high;
+  int hscroll, vscroll;
+  unsigned cached_tx, cached_ty;
+  uint16_t tile;
+} PlainBg;
+static void plain_bg_init(PlainBg *b, const Ppu *p, const Raster *r, unsigned layer) {
+  static const unsigned low[] = {8, 7, 1}, high[] = {12, 11, 3};
+  b->vram = raster_vram(r);
+  b->size = PPU_bigTiles(p, layer) ? 16 : 8;
+  b->shift = b->size == 16 ? 4 : 3;   /* px / size, without a divide */
+  b->bpp = layer == 2 ? 2 : 4;
+  b->sc = p->bgXsc[layer];
+  b->tile_base = PPU_bgTileAdr(p, layer);
+  b->prio_low = low[layer];
+  b->prio_high = layer == 2 && (p->bgmode & 8) ? 15 : high[layer];
+  b->hscroll = p->hScroll[layer];
+  b->vscroll = p->vScroll[layer];
+  b->cached_tx = b->cached_ty = ~0u;
+  b->tile = 0;
+}
+static inline uint16_t background_plain(PlainBg *b, unsigned layer, int x, int y) {
+  int px = (x + b->hscroll) & 1023, py = (y + b->vscroll) & 1023;
+  unsigned tx = (unsigned)px >> b->shift, ty = (unsigned)py >> b->shift;
+  if (tx != b->cached_tx || ty != b->cached_ty) {
+    unsigned a = (b->sc & 0xfc) * 256 + (tx & 31) + (ty & 31) * 32;
+    if ((b->sc & 1) && (tx & 32)) a += 1024;
+    if ((b->sc & 2) && (ty & 32)) a += (b->sc & 1) ? 2048 : 1024;
+    b->tile = b->vram[a & 0x7fff];
+    b->cached_tx = tx;
+    b->cached_ty = ty;
+  }
+  const uint16_t tile = b->tile;
+  int cx = px & (b->size - 1), cy = py & (b->size - 1);
+  if (tile & 0x4000) cx = b->size - 1 - cx;
+  if (tile & 0x8000) cy = b->size - 1 - cy;
+  unsigned number = ((tile & 1023) + cx / 8 + cy / 8 * 16) & 1023;
+  unsigned address = (b->tile_base + number * b->bpp * 4) & 0x7fff;
+  unsigned pixel = tile_pixel(b->vram, address, cx & 7, cy & 7, b->bpp);
+  if (!pixel) return 0;
+  unsigned index = (((tile >> 10) & 7) << b->bpp) | pixel;
+  unsigned priority = tile & 0x2000 ? b->prio_high : b->prio_low;
+  return (uint16_t)((priority << 12) | (layer << 8) | index);
 }
 static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x, int y, bool stage, int *private_color) {
   static const unsigned low[] = {8, 7, 1}, high[] = {12, 11, 3};
@@ -1258,6 +1328,9 @@ static void coop_hud_row(const Ppu *ppu,const Raster *r,int y,MmxRenderView view
 }
 /* Everything a row reads that MmxRendererDraw prepares once per frame.
  * Rows only read it, so they can be composed in any order, on any thread. */
+bool g_mmx_render_fast_paths = true;
+bool g_mmx_render_threads = true;
+
 static inline int lowest_bit(uint64_t bits) {
 #if defined(_MSC_VER)
   unsigned long index;
@@ -1340,7 +1413,7 @@ static void draw_row(const DrawCtx *c, int y) {
   bool zero_drawn[2] = {false,false};
   /* OAM normally holds still for a whole frame, so a row whose OAM equals the
    * first line's reuses the per-piece slot matches DrawCtx precomputed. */
-  const bool oam_is_reference =
+  const bool oam_is_reference = g_mmx_render_fast_paths &&
       !memcmp(r->oam, frame.lines[0].oam, sizeof(r->oam)) &&
       !memcmp(r->high_oam, frame.lines[0].high_oam, sizeof(r->high_oam));
   for (int i = (int)piece_count - 1; i >= 0; --i) {
@@ -1554,6 +1627,16 @@ static void draw_row(const DrawCtx *c, int y) {
   }
   if (swapping) teleport_actor_row(frame.ram,&frame_zero,&p,r,y,view,objects,object_colors);
   if(coop_hud) coop_hud_row(&p,r,y,view,hud,objects,object_colors);
+  bool memo_valid = false, memo_inside = false, memo_dialogue = false;
+  uint16_t memo_main = 0, memo_sub = 0;
+  int memo_object = 0, memo_bg[3] = {0, 0, 0};
+  uint32_t memo_rgb = 0;
+  PlainBg plain[3];
+  bool plain_ok[3];
+  for (int layer = 0; layer < 3; ++layer) {
+    plain_bg_init(&plain[layer], &p, r, (unsigned)layer);
+    plain_ok[layer] = g_mmx_render_fast_paths && !view_dx && !view_dy && !(layer == 0 && !stage);
+  }
   for (int sx = 0; sx < view.width; ++sx) {
     int x = sx - view.extra;
     if (menu && (x < 0 || x >= 256)) { out[y * view.width + sx] = 0; continue; }
@@ -1564,7 +1647,9 @@ static void draw_row(const DrawCtx *c, int y) {
       if (stage && layer==0) by+=crystal_ripple[y];
       if (p.mosaic & (1 << layer)) { int size = (p.mosaic >> 4) + 1;
         bx -= ((bx % size) + size) % size; by -= by % size; }
-      bg[layer] = background(&p, r, layer, bx, by, stage, &bg_colors[layer]);
+      bg[layer] = plain_ok[layer] && bx >= 0 && bx < 256
+          ? background_plain(&plain[layer], (unsigned)layer, bx, by)
+          : background(&p, r, layer, bx, by, stage, &bg_colors[layer]);
     }
     if (palette_fade) {
       for (int layer = 0; layer < 3; ++layer) if (bg_colors[layer] >= 0)
@@ -1585,8 +1670,22 @@ static void draw_row(const DrawCtx *c, int y) {
       for (unsigned i = 0; i < beam_count; ++i)
         color_window |= x >= beams[i].left[y] && x <= beams[i].right[y];
     }
-    out[y * view.width + sx] = colour(&p, r->palette, brightness, screens[0], screens[1], color_window, object_colors[sx], bg_colors,
-                                     dialogue_backdrop && (x < 0 || x >= 256));
+    /* colour() is pure in these inputs (palette, brightness and p are fixed
+     * for the row): runs of identical pixels -- sky, flat walls, empty
+     * margins -- reuse the previous result. */
+    const bool dialogue_margin = dialogue_backdrop && (x < 0 || x >= 256);
+    if (!memo_valid || !g_mmx_render_fast_paths || screens[0] != memo_main || screens[1] != memo_sub ||
+        color_window != memo_inside || object_colors[sx] != memo_object ||
+        bg_colors[0] != memo_bg[0] || bg_colors[1] != memo_bg[1] ||
+        bg_colors[2] != memo_bg[2] || dialogue_margin != memo_dialogue) {
+      memo_rgb = colour(&p, r->palette, brightness, screens[0], screens[1], color_window,
+                        object_colors[sx], bg_colors, dialogue_margin);
+      memo_valid = true; memo_main = screens[0]; memo_sub = screens[1];
+      memo_inside = color_window; memo_object = object_colors[sx];
+      memo_bg[0] = bg_colors[0]; memo_bg[1] = bg_colors[1]; memo_bg[2] = bg_colors[2];
+      memo_dialogue = dialogue_margin;
+    }
+    out[y * view.width + sx] = memo_rgb;
   }
 #undef x_weapon_palette
 }
@@ -1668,7 +1767,7 @@ static void render_start_workers(void) {
 static void render_rows(void) {
   if (s_render_worker_count < 0) render_start_workers();
   s_render_next = 0;
-  if (s_render_worker_count == 0) { render_take_rows(); return; }
+  if (s_render_worker_count == 0 || !g_mmx_render_threads) { render_take_rows(); return; }
   pthread_mutex_lock(&s_render_mutex);
   s_render_pending = (unsigned)s_render_worker_count;
   ++s_render_generation;

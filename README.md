@@ -1,6 +1,6 @@
 # Mega Man X Recompiled for Nintendo Switch (MegaManX-NX)
 
-**Version:** 1.0.1
+**Version:** 1.0.2
 **Author (Switch port):** Thorhax
 **Target:** Nintendo Switch homebrew (Atmosphère / Horizon OS)
 
@@ -8,13 +8,10 @@ A native Nintendo Switch port of [Mega Man X Recompiled](https://github.com/msta
 by mstan: a static recompilation of the SNES game *Mega Man X* (USA, Rev 1) to C.
 The launcher, mods, password saves, save states and rewind all come with it.
 
-> [!IMPORTANT]
-> **Performance and CPU clock.** The original 4:3 game runs at a locked 60 FPS
-> at the stock CPU clock (1020 MHz). Widescreen, Zero / co-op and the X2/X3
-> weapons use a much heavier renderer: for a stable 60 FPS with any of them,
-> **overclock the CPU to 1785 MHz** (e.g. with sys-clk). The NRO never changes
-> the clock itself. Widescreen is on by default; turn it off in the launcher's
-> **Mods** page to play at stock clock.
+> [!NOTE]
+> **Performance.** The game runs at 60 FPS at the stock CPU clock (1020 MHz),
+> including widescreen, Zero / co-op and the X2/X3 weapons. The NRO never
+> changes the clock itself; overclocking only adds headroom.
 
 ## Features
 

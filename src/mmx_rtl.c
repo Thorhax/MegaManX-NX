@@ -10,6 +10,7 @@
 #include "variables.h"
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
+#include "snes/ppu.h"
 #include "cpu_state.h"
 #include "execution_mode.h"
 #include "funcs.h"
@@ -20,6 +21,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "fiber_compat.h"   /* Win32 Fibers on Windows, ucontext shim on POSIX */
 #include "apu_frame_clock.h"
 
@@ -172,6 +174,15 @@ static uint16_t g_slot_base_s[MMX_NSLOTS];          /* entry-S, latched at seed 
 static uint8_t  g_slot_resume_pending[MMX_NSLOTS];  /* set by state load */
 static MmxWideSpawnCursor s_ws_spawn_cursor;
 static uint8_t s_ws_spawn_cursor_stage = 0xff;
+/* Type-3 records the wide spawn pass held back until their graphics are
+ * resident (MmxWsSpawnRecordAllowed), identified by DCDB's WRAM list entry
+ * ($14, whose first byte is the record's spawned flag). Only these become
+ * eligible for the native pass, so enemies killed early still cannot respawn
+ * there. Host-side and small: cleared on a stage change or checkpoint
+ * restart, oldest dropped when full. */
+static uint16 s_ws_deferred[16];
+static unsigned s_ws_deferred_count;
+static uint8_t s_ws_deferred_stage = 0xff;
 /* Yields reached through the non-standard HLE paths (scheduler-dispatch
  * $80E6) have no popped-frame contract; they clear the slot's resume info
  * instead of capturing a bogus one. Non-static: gen_stubs.c's HLE bodies
@@ -562,6 +573,7 @@ void MmxOnStateLoaded(uint32_t version) {
             "(reliable only from a matching game mode)\n", version);
     s_ws_spawn_cursor.valid = false;
     s_ws_spawn_cursor_stage = 0xff;
+    s_ws_deferred_count = 0;
     return;
   }
   const MmxSavChunk *c = &g_load_chunk;
@@ -802,6 +814,9 @@ void MmxSchedulerTick(void) {
   g_ram[0x0BA0] = 0x00;
 }
 
+/* Draw every line natively, as before the per-line skip (A/B debugging). */
+bool g_mmx_native_raster;
+
 void MmxDrawPpuFrame(void) {
   SimpleHdma hdma_chans[3];
 
@@ -818,8 +833,21 @@ void MmxDrawPpuFrame(void) {
 
   int trigger = g_snes->vIrqEnabled ? g_snes->vTimer + 1 : -1;
 
+  /* Lines the custom renderer composes itself need no native pixels; the PPU
+   * still runs every register-side effect of them. MMX never reads $213E
+   * (no such access in its program), so the sprite pass can go too.
+   * MMX_NATIVE_RASTER=1 keeps drawing every line, for comparisons. */
+  static bool s_native_raster_init;
+  if (!s_native_raster_init) {
+    const char *env = getenv("MMX_NATIVE_RASTER");
+    g_mmx_native_raster = env && *env && *env != '0';
+    s_native_raster_init = true;
+  }
   for (int i = 0; i <= 224; i++) {
     if (g_mmx_custom_renderer) MmxRendererCaptureLine(g_ppu, i);
+    g_ppu_skip_line_pixels = g_mmx_custom_renderer && !g_mmx_native_raster &&
+        MmxRendererCapturedLineIsCustom(g_ppu, (unsigned)i);
+    g_ppu_skip_line_sprites = g_ppu_skip_line_pixels;
     ppu_runLine(g_ppu, i);
     SimpleHdma_DoLine(&hdma_chans[0]);
     SimpleHdma_DoLine(&hdma_chans[1]);
@@ -840,6 +868,7 @@ void MmxDrawPpuFrame(void) {
       trigger = g_snes->vIrqEnabled ? g_snes->vTimer + 1 : -1;
     }
   }
+  g_ppu_skip_line_pixels = g_ppu_skip_line_sprites = false;
 }
 
 void RunOneFrameOfGame(void) {
@@ -1028,8 +1057,10 @@ void RunOneFrameOfGame(void) {
   MmxCoopTraceFrame(g_ram);
   /* Out of play (death, level setup, arrival) the widened spawn cursor is
    * stale; drop it even when no scan runs before play resumes. */
-  if (!MmxWidePolicy_WideSpawnCursorPersists(g_ram))
+  if (!MmxWidePolicy_WideSpawnCursorPersists(g_ram)) {
     s_ws_spawn_cursor.valid = false;
+    s_ws_deferred_count = 0;
+  }
   g_first_frame_done = true;
   MmxCoopDiagnosticFrame(g_ram);
 }
@@ -1210,8 +1241,10 @@ static uint16 MmxWsSpawnPreparePasses(uint16 native_anchor,
   /* A checkpoint restart stays in the same stage but rebuilds the guest's
    * cursor: a widened cursor left from before the death would skip every
    * record between the checkpoint and the death. */
-  if (!MmxWidePolicy_WideSpawnCursorPersists(g_ram))
+  if (!MmxWidePolicy_WideSpawnCursorPersists(g_ram)) {
     s_ws_spawn_cursor.valid = false;
+    s_ws_deferred_count = 0;
+  }
 
   s_ws_spawn_pass.native_cursor_before = MmxWsSpawnReadCursor(dpage);
   const uint16 wide_cursor = MmxWidePolicy_BeginWideSpawnPass(
@@ -1261,6 +1294,41 @@ uint16 MmxWsSpawnAnchorLeft(uint16 v, uint16 dpage) {
   return MmxWsSpawnPreparePasses(v, wide, dpage);
 }
 
+static uint16 MmxWsSpawnRecordEntry(uint16 dpage) {
+  extern uint8_t g_ram[0x20000];
+  return (uint16)(g_ram[(uint16)(dpage + 0x14)] |
+                  ((uint16)g_ram[(uint16)(dpage + 0x15)] << 8));
+}
+static void MmxWsDeferredSyncStage(void) {
+  extern uint8_t g_ram[0x20000];
+  if (s_ws_deferred_stage != g_ram[0x1f7a]) {
+    s_ws_deferred_stage = g_ram[0x1f7a];
+    s_ws_deferred_count = 0;
+  }
+}
+static void MmxWsDeferRecord(uint16 entry) {
+  MmxWsDeferredSyncStage();
+  for (unsigned i = 0; i < s_ws_deferred_count; ++i)
+    if (s_ws_deferred[i] == entry) return;
+  if (s_ws_deferred_count == sizeof(s_ws_deferred) / sizeof(s_ws_deferred[0])) {
+    memmove(s_ws_deferred, s_ws_deferred + 1,
+            (s_ws_deferred_count - 1) * sizeof(s_ws_deferred[0]));
+    --s_ws_deferred_count;
+  }
+  s_ws_deferred[s_ws_deferred_count++] = entry;
+}
+static int MmxWsTakeDeferredRecord(uint16 entry) {
+  MmxWsDeferredSyncStage();
+  for (unsigned i = 0; i < s_ws_deferred_count; ++i) {
+    if (s_ws_deferred[i] != entry) continue;
+    memmove(s_ws_deferred + i, s_ws_deferred + i + 1,
+            (s_ws_deferred_count - i - 1) * sizeof(s_ws_deferred[0]));
+    --s_ws_deferred_count;
+    return 1;
+  }
+  return 0;
+}
+
 /* Called from DCDB after it reads the event descriptor's first byte. High
  * bits are difficulty filters; the low nibble is the allocation/event type. */
 int MmxWsSpawnRecordAllowed(uint16 dpage, uint8 type) {
@@ -1281,9 +1349,23 @@ int MmxWsSpawnRecordAllowed(uint16 dpage, uint8 type) {
   if (anchor == s_ws_spawn_pass.wide_anchor) {
     allowed = MmxWidePolicy_SpawnRecordAllowed(
         g_ram[0x1f7a], kind, object_id, false);
+    /* The wide anchor runs ahead of the stage's graphics events, which keep
+     * native timing. An enemy created before its resource is loaded copies
+     * an empty VRAM slot in $82:827D and stays invisible for its whole life
+     * (Highway's missile mech when the camera outruns a walk, e.g. Zero's
+     * dash). Leave such a record to the native pass: the guest's own cursor
+     * still holds it, so it spawns at the authentic 4:3 anchor instead. */
+    if (allowed && kind == 3 &&
+        !MmxWidePolicy_EnemyGraphicsResident(g_ram, RomPtr(0x86A5E4u), object_id)) {
+      MmxWsDeferRecord(MmxWsSpawnRecordEntry(dpage));
+      allowed = 0;
+    }
   } else if (anchor == s_ws_spawn_pass.native_anchor) {
     allowed = MmxWidePolicy_SpawnRecordAllowed(
         g_ram[0x1f7a], kind, object_id, true);
+    /* A record the wide pass held back is the native pass's to spawn. */
+    if (!allowed && kind == 3 && MmxWsTakeDeferredRecord(MmxWsSpawnRecordEntry(dpage)))
+      allowed = 1;
   }
   return allowed;
 }
@@ -1949,6 +2031,7 @@ void MmxOnHardwareReset(void) {
   s_ws_recover_armor = false;
   s_ws_spawn_cursor.valid = false;
   s_ws_spawn_cursor_stage = 0xff;
+  s_ws_deferred_count = 0;
   MmxWideStateApply(false);
   memset(&s_ws_spawn_pass, 0, sizeof(s_ws_spawn_pass));
   memset(&s_ws_fire, 0, sizeof(s_ws_fire));

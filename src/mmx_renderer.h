@@ -47,6 +47,13 @@ void MmxRendererCoopFrame(const MmxCoopState *state);
 void MmxRendererHoldFrame(bool held);
 void MmxRendererCaptureLine(const Ppu *ppu, unsigned line);
 bool MmxRendererEndFrame(const uint32_t stock[256 * 224]);
+/* After MmxRendererCaptureLine(ppu, line): true when MmxRendererDraw will
+ * compose this line itself, so the native PPU need not draw its pixels. The
+ * same scene and BG-mode tests the draw applies; false whenever unsure. */
+bool MmxRendererCapturedLineIsCustom(const Ppu *ppu, unsigned line);
+/* Debug switches for A/B comparisons on the console (default on): */
+extern bool g_mmx_render_fast_paths;   /* OAM match reuse, plain BG path, colour memo */
+extern bool g_mmx_render_threads;      /* compose rows on the worker threads */
 bool MmxRendererDraw(uint32_t *output, MmxRenderView view, bool anchor_hud);
 MmxRenderStats MmxRendererGetStats(void);
 bool MmxRendererStageTile(const uint8_t ram[0x20000], unsigned layer,

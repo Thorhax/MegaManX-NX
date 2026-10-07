@@ -65,6 +65,13 @@ bool MmxWidePolicy_WideSpawnCursorPersists(const uint8_t ram[0x20000]);
  * ordinary enemies and belong to the early wide pass; kinds 0-2 retain native
  * timing. A small number of stable stage/object identities override that
  * broad kind classification. */
+/* True when the enemy type's graphics resource is resident: the slot tables
+ * $7F:8200/$7F:8300 that $82:827D copies into a new enemy (VRAM tile base and
+ * OAM attributes), indexed by the resource byte of the ROM table at $86:A5E4.
+ * `resource_table` points at $86:A5E4. */
+bool MmxWidePolicy_EnemyGraphicsResident(const uint8_t ram[0x20000],
+                                         const uint8_t *resource_table,
+                                         uint8_t object_id);
 bool MmxWidePolicy_SpawnRecordAllowed(uint8_t stage, uint8_t kind,
                                       uint8_t object_id, bool native_pass);
 /* Protect allocation-sensitive Vile scripts before a larger lookahead can

@@ -4,12 +4,10 @@ A homebrew (NRO) build of this project for Atmosphère. It runs the same
 recompiled game, mods (Zero, co-op, X2/X3 weapons, widescreen, password saves)
 and launcher as the PC release. Bring your own ROMs: none are included.
 
-> [!IMPORTANT]
-> **Performance and CPU clock.** The original 4:3 game runs at a locked 60 FPS
-> at the stock CPU clock (1020 MHz). Widescreen, Zero / co-op and the X2/X3
-> weapons use a much heavier renderer: for a stable 60 FPS with any of them,
-> **overclock the CPU to 1785 MHz** (e.g. with sys-clk). The NRO never changes
-> the clock itself.
+> [!NOTE]
+> **Performance.** The game runs at 60 FPS at the stock CPU clock (1020 MHz),
+> including widescreen, Zero / co-op and the X2/X3 weapons. The NRO never
+> changes the clock itself; overclocking only adds headroom.
 
 ## Install
 
