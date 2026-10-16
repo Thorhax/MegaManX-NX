@@ -1,7 +1,12 @@
 #include "mmx_renderer.h"
 #include "mmx_zero.h"
 #include "mmx_weapons.h"
+#include "mmx_knc_bugfix.h"
 #include <stdio.h>
+
+/* KNC Bugfix */
+bool MmxKncBugfixActive(unsigned seat) { (void)seat;return false; }
+unsigned MmxKncBugfixPhase(void) { return 0; }
 
 static bool bmp(const char *path, const uint32_t *pixels, int width) {
   FILE *f = fopen(path, "wb");

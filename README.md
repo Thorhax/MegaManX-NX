@@ -1,6 +1,6 @@
 # Mega Man X Recompiled for Nintendo Switch (MegaManX-NX)
 
-**Version:** 1.0.2
+**Version:** 1.1.0
 **Author (Switch port):** Thorhax
 **Target:** Nintendo Switch homebrew (Atmosphère / Horizon OS)
 
@@ -17,7 +17,7 @@ The launcher, mods, password saves, save states and rewind all come with it.
 
 - **60 FPS** with frame pacing locked to the Switch display.
 - **16:9 widescreen** (on by default) with an anchored HUD.
-- **Playable Zero**, **X / Zero co-op**, and the **X2 / X3 boss weapons**, using your own X2/X3 ROMs.
+- **Playable Zero** (X3, Modern or **Saber Zero** behavior), **X / Zero co-op**, and the **X2 / X3 boss weapons**, using your own X2/X3 ROMs.
 - **The full launcher** on the console: Mods, Controls and Settings. It works with a controller or the touchscreen, and has a built-in SD-card file browser.
 - **Password saves**, a **save-state browser** and **rewind**.
 - **Bring your own ROM.** The NRO contains no ROM data, graphics or music. It reads them from your own ROM.
@@ -70,6 +70,8 @@ and `switch/package.sh`. The upstream project's own documentation is in
 - **mstan**: [Mega Man X Recompiled](https://github.com/mstan/MegaManXSNESRecomp),
   the recompilation, its mods (Zero, co-op, X2/X3 weapons, widescreen, password
   saves) and the launcher integration. This port is built on it.
+- **RaphaelAzev**: Saber Zero. Its sprites and sounds come from the Zashiko
+  Mod, included upstream with permission (see `assets/saber-zero/CREDITS.md`).
 - **RetroPortingToolKit**: the [snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp)
   framework and the [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui) launcher.
 - Third-party components keep their own licenses. See `third_party/`,

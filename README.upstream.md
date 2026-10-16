@@ -1,12 +1,52 @@
 # Mega Man X Recompiled
 
+## Windows frame composition
+
+The pinned shared framework uses cached HLE frame composition by default on
+Windows x64. Guest CPU, mapper, audio and status behavior keep their existing
+interfaces; this is a host presentation optimization. For the maintained
+correctness-reference compositor, configure a separate Release build with
+`cmake -S . -B build-frame-lle -DCMAKE_BUILD_TYPE=Release -DSNESRECOMP_FRAME_IMPL=LLE`,
+then `cmake --build build-frame-lle`. Selection is fixed at build time.
+LLE can reduce performance; it remains available for correctness checks. Other
+platforms keep LLE defaults, and existing CMake cache selections are preserved.
+See [HLE defaults and opt-out](snesrecomp/docs/HLE_DEFAULTS.md).
+
+The reviewed native-view, uncapped Windows route measured 340.936 to 889.911 FPS
+(+161.02%, process CPU -67.17%); it includes boot/menu work and active gameplay.
+The owner accepted the normal-paced adaptive HLE build. These figures describe
+that measured build/route, not a new measurement of subsequent upstream title
+changes or other platforms. Foreign compiler activity limits precision.
+Normal play retains normal pacing/audio. See the shared framework's
+[frame model](snesrecomp/docs/FRAME_MODEL_HOSTS.md) for the host/guest boundary.
+
 Play *Mega Man X* on PC with playable Zero, couch co-op and online netplay,
 all sixteen X2/X3 boss weapons, and adaptive widescreen. Choose Zero's original
-X3 combat or the optional Modern style with direct saber attacks, a second
-jump, and an air dash.
+X3 combat, the optional Modern style with direct saber attacks, a second
+jump, and an air dash, or [Saber Zero](#saber-zero) by RaphaelAzev.
 
 [Download](https://github.com/mstan/MegaManXSNESRecomp/releases/latest) |
 [Getting started](#quick-start-pre-built-release) | [Netplay setup](docs/netplay.md)
+
+## Saber Zero
+
+**Saber Zero** is contributed by [RaphaelAzev](https://github.com/RaphaelAzev),
+from the [MegaManXSNESRecompSaberZero](https://github.com/RaphaelAzev/MegaManXSNESRecompSaberZero)
+fork. It gives Zero a Y-button Z-Saber: a 3-hit ground combo, air, wall and dash
+slashes, the X3 finisher with its Saber wave, hit-priority follow-ups, and Ride
+Armor pilot art. The X button keeps Zero's buster and special weapons.
+
+To play it, choose **Zero behavior → Saber Zero** in either **Characters → Add
+Zero** (single player, Select switches X/Zero) or **Characters → Co-op**
+(whichever player is Zero). Both use your Mega Man X3 USA ROM, like the other
+Zero modes. The optional **Characters → Saber Zero settings** entry tunes its
+damage, hit priorities, finisher window and swing volume, and can outline
+hitboxes. Without it, Saber Zero uses RaphaelAzev's defaults.
+
+The Saber sprites and sound effects come from the
+[Zashiko Mod](assets/saber-zero/CREDITS.md). They are included with permission
+for non-commercial use only. Controls, timings, the priority ladder and every
+option are in the [Saber Zero reference](docs/saber-zero.md).
 
 <a href="https://www.youtube.com/watch?v=TDysNWWJ25g">
   <img src="https://i.ytimg.com/vi/TDysNWWJ25g/maxresdefault.jpg" width="880" alt="Watch the Mega Man X Recompiled gameplay showcase on YouTube">
@@ -92,8 +132,10 @@ For couch co-op, assign a controller or keyboard to each player. For netplay,
 configure your local **Player 1** controls; the lobby assigns your game seat.
 
 P2 joins automatically at a safe stage entrance in co-op. Hold P2 **Select**
-for 1.5 seconds to withdraw, and tap it to rejoin. A player who dies remains out
-until the next stage or a team restart.
+for 1.5 seconds to withdraw, and tap it to rejoin. A player who dies can tap
+**Select** to respawn beside the partner for one of the team's lives. Respawns
+are not available during boss or miniboss fights; the request waits until the
+fight is over, or until a 1-up is collected if no lives are left.
 
 Reopen the launcher during play with **Ctrl+L** or controller **Select+L3**.
 Configure system shortcuts in **Hotkeys**. **F7** opens the save-state browser
@@ -117,11 +159,63 @@ For netplay connection problems, enable the **Tier 2 diagnostics** mod
 through STUN or through TURN, and any stalls); attach it with the log. The
 file is replaced by the next match.
 
-For intermittent co-op collision problems, tick **Co-op physics diagnostics**
-under **Mods > Developer**, then play normally. Attach `logs/coop-physics-*.csv`
-and its `.previous.csv` companion if present. During netplay the same mod also
-writes `logs/coop-netplay-*.csv` with the same name stem; attach that too, from
-both players if possible. This extra tracing is off by default.
+Replay diagnostics are **enabled by default**, including when updating an
+existing installation. Normal play records both players' inputs, machine
+checkpoints, display settings and per-frame state checks. No Developer mod
+needs to be enabled. When a problem occurs, stop playing and zip the session's
+`logs/mmx-replay-*` files together, including **all `.replay`, `.replay.sav`,
+`.config.ini`, `.mods.toml` and `.mods.txt` files**. A `.replay` alone is insufficient.
+During netplay, collect the files from both players if possible. Describe what
+happened and roughly when. Keep your source ROMs out of the attachment.
+
+The newest six replay segments are kept (normally about a minute of gameplay;
+rollback or frequent state loads can shorten this). Each segment is capped at
+600 frame executions or 16 MiB of checkpoints. Run-ahead currently suspends
+replay capture; turn it off while collecting a report. To opt out of automatic
+recording, set the environment variable `MMX_REPLAY_RECORD=0` and leave the
+Developer diagnostic options disabled.
+
+For extra detail, enable **Co-op physics diagnostics** or **Tier 2 diagnostics**
+under **Mods > Developer**. These optional detailed traces remain off by default;
+the rolling replay capture runs without them.
+
+The existing collision trace is written in 32 MiB
+numbered segments (`logs/coop-physics-<start time>-<pid>-<n>-001.csv`, `-002.csv`,
+...); the newest 32 are kept. Attach every segment of the session. During netplay
+the same mod also writes `logs/coop-netplay-*` segments with the same name stem;
+attach those too, from both players if possible.
+
+Developers can reproduce a capture with the same build and owned source ROMs:
+
+```sh
+python tools/replay_diagnostic.py capture.replay --exe path/to/MegaManXSNESRecomp --rom path/to/mmx.sfc --x3-rom path/to/mmx3.sfc --headless
+```
+
+The helper stages the captured settings in a new directory, replays offline,
+and stops at the first WRAM, co-op, camera-state or VRAM mismatch with a nonzero
+exit status. Use `--until N` to stop after N executions, or omit `--headless`
+to watch. A mismatch also saves `replay-divergence.sav` in the reproduction
+directory. `--check` inspects the log without starting the game. A final input
+without a completed checkpoint identifies an interrupted frame; it is reported
+as incomplete, never as a successful replay. Playback executes that final input
+so the original hang/crash can recur under a debugger. The format preserves actual
+rollback executions and restored checkpoints, so do not deduplicate frame
+numbers as an input-only CSV route would.
+
+The ROM-backed acceptance suite is `tests/test_diagnostic_replay.py`; build
+with `-DMMX_STATE_TESTS=ON` and supply `--state-tests`, `--game`, `--rom`,
+`--assets` (your extracted X3 Zero cache), and a new `--work-dir`. An optional
+`--fixture` pointing to an upgraded gameplay checkpoint also checks P2 X armor
+arrival, native checkpoint restart, and original-ROM sprite transfers during
+movement and dash.
+Supply `--x3-rom` to also exercise desktop Saber Zero playback when the saved
+offline preferences differ from the active mod selection.
+
+To see collision boxes, tick **Hitbox overlay** under **Mods > Developer**. It
+outlines each object's native hitbox: enemies red, players green (both players in
+co-op), player shots yellow, Zero and Saber attacks cyan, enemy projectiles
+magenta. It only draws, works with or without widescreen, and does not change the
+game. Items and pickups are not outlined.
 
 <details>
 <summary>Building from source and technical details</summary>
@@ -333,6 +427,15 @@ copy.
 | `config.ini` | The config. Generated next to the exe on first run if missing. |
 
 </details>
+
+## Disassembly annotations
+
+[bogaa/dizProjects](https://github.com/bogaa/dizProjects) is pinned at
+`third_party/dizProjects`. Its X1 project supplies named gameplay routines,
+sprite/data tables and player RAM fields. The tracked [symbol metadata](symbols/README.md)
+names discovered code and adds searchable annotations during regeneration.
+Reviewed project names keep precedence. Search with
+`python tools/diz_annotations.py --query charge`.
 
 ## License
 

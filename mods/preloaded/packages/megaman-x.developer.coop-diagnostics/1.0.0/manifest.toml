@@ -15,7 +15,7 @@ rom_sha256 = "b8f70a6e7fb93819f79693578887e2c11e196bdf1ac6ddc7cb924b1ad0be2d32"
 [[feature]]
 id = "coop-diagnostics"
 name = "Co-op physics diagnostics"
-description = "Write logs/coop-physics-*.csv during co-op play to diagnose movement, platform, pickup and shot-contact problems. If netplay is active, also write netplay diagnostics to logs/coop-netplay-*.csv in the same logs folder."
+description = "Add detailed co-op physics CSVs to the replay diagnostics already recorded by default in logs/mmx-replay-*. After a problem, stop playing and zip the session's replay files, sidecars and CSVs. For netplay, collect both players' logs. Disable run-ahead while recording."
 group = "Developer"
 default_enabled = false
 

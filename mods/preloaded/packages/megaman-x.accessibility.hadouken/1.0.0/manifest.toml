@@ -1,0 +1,24 @@
+format_version = 1
+id = "megaman-x.accessibility.hadouken"
+version = "1.0.0"
+name = "Mega Man X Easy Hadouken"
+author = "mstan"
+description = "Use Hadouken with a single button instead of a quarter-circle motion."
+license = "MIT"
+resolver = "declarative"
+save_compatibility = "shared"
+
+[[target]]
+game_id = "megaman-x-us"
+rom_sha256 = "b8f70a6e7fb93819f79693578887e2c11e196bdf1ac6ddc7cb924b1ad0be2d32"
+
+[[feature]]
+id = "hadouken"
+name = "Easy Hadouken"
+description = "Press Y with X's buster equipped to use an acquired Hadouken at full health. The original motion still works."
+group = "Accessibility"
+default_enabled = false
+
+[[plugin]]
+feature = "hadouken"
+id = "megaman-x.hadouken"

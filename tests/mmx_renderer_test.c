@@ -1,9 +1,14 @@
 #include "mmx_renderer.h"
 #include "mmx_render_assets.h"
 #include "mmx_zero.h"
+#include "mmx_knc_bugfix.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+
+/* KNC Bugfix */
+bool MmxKncBugfixActive(unsigned seat) { (void)seat;return false; }
+unsigned MmxKncBugfixPhase(void) { return 0; }
 
 static uint8_t ram[0x20000], rom_bytes[0x100000];
 static Ppu ppu;

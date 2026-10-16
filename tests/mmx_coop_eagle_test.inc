@@ -62,6 +62,126 @@ static void coop_eagle_checks(const char *directory,uint8_t *start,uint8_t *expe
   puts("MMX CO-OP EAGLE CHECKS PASSED");
 }
 
+/* Keep private boss fixtures optional; exercise the real wind controller,
+ * including its directional and vertical exclusions and single timer tick. */
+static void coop_eagle_wind_checks(const char *directory,uint8_t *start,
+    uint8_t *expected,uint8_t *actual,size_t cap) {
+  eagle_fixture(directory,2,0);
+  bool departed=false;unsigned boss=0;
+  for(unsigned tick=0;tick<1000 && !boss;++tick) {
+    coop_frames(1,departed?0:SNES_PAD_RIGHT,0);
+    MmxCoopState s=MmxCoopGetState();departed|=s.scene_phase!=0;
+    if(s.scene_phase) continue;
+    for(unsigned d=0xe68;d<0x1228;d+=64)
+      if(g_ram[d] && g_ram[d+10]==0x52 && g_ram[d+1]==4) boss=d;
+  }
+  check(boss!=0,"private Eagle checkpoint reaches combat");
+  if(getenv("MMX_COOP_EAGLE_WIND_SAVE")) check(RtlSaveSnapshot(getenv("MMX_COOP_EAGLE_WIND_SAVE")),"private Eagle combat checkpoint saves");
+  size_t checkpoint=RtlSaveSnapshotToMemory(start,cap);
+  for(unsigned anchor=0;anchor<2;++anchor) for(unsigned scenario=0;scenario<5;++scenario) {
+    check(RtlLoadSnapshotFromMemory(start,checkpoint),"Eagle combat restores");
+    MmxCoopCapture(g_ram);MmxCoopState s=MmxCoopGetState();
+    unsigned x=coop_x(&s.players[0]),y=coop_y(&s.players[0]);
+    for(unsigned seat=0;seat<2;++seat) {
+      MmxCoopPlayer *p=&s.players[seat];
+      eagle_putword(p->body+5,x);eagle_putword(p->body+8,y);
+      eagle_putword(p->body+0x22,x);eagle_putword(p->body+0x24,y);
+      memset(p->body+0x1a,0,4);p->body[2]=p->body[3]=0;
+      p->status=MMX_COOP_ALIVE;p->body[0x27]=0x98;p->zero.swap_phase=0;
+      memset(p->shots,0,sizeof(p->shots));
+    }
+    unsigned other=anchor^1;
+    if(scenario==2) eagle_putword(s.players[other].body+5,x+120);
+    if(scenario==3) eagle_putword(s.players[anchor].body+8,y-48);
+    if(scenario==4) {s.players[other].status=MMX_COOP_FALLEN;s.players[other].body[0x27]=0;}
+    unsigned before[2]={coop_x(&s.players[0]),coop_x(&s.players[1])};
+    s.current=s.anchor=(uint8_t)anchor;s.scene_owner=s.scene_phase=s.stage_pending=0;
+    memcpy(g_ram+0xba8,s.players[anchor].body,sizeof(s.players[0].body));
+    MmxZeroSetState(s.players[anchor].zero);MmxCoopSetState(&s);
+    /* Wind substate, facing toward the players, with time remaining. */
+    g_ram[boss+1]=4;g_ram[boss+2]=0;g_ram[boss+3]=4;
+    eagle_putword(g_ram+boss+5,scenario==1?x-100:x+100);
+    eagle_putword(g_ram+boss+8,scenario==3?y-48:y);eagle_putword(g_ram+boss+0x10,scenario==1?0x4000:0);
+    eagle_putword(g_ram+boss+0x34,100);g_ram[boss+0x39]=2;
+    coop_frames(1,0,0);s=MmxCoopGetState();
+    int delta=scenario==1?2:-2;
+    fprintf(stderr,"Eagle wind anchor=%u case=%u x=%u/%u -> %u/%u timer=%u state=%u/%u/%u\n",
+      anchor,scenario,before[0],before[1],coop_x(&s.players[0]),coop_x(&s.players[1]),
+      eagle_word(g_ram+boss+0x34),g_ram[boss+1],g_ram[boss+2],g_ram[boss+3]);
+    check(coop_x(&s.players[anchor])==before[anchor]+delta,"native world player receives wind");
+    if(scenario<4) check(coop_x(&s.players[other])==before[other]+(scenario<2?delta:0),
+      "partner wind obeys native facing and height rules");
+    check(eagle_word(g_ram+boss+0x34)==99,"wind timer advances only once");
+  }
+  size_t n=RtlSaveSnapshotToMemory(start,cap);
+  coop_frames(4,0,0);size_t en=RtlSaveSnapshotToMemory(expected,cap);
+  check(RtlLoadSnapshotFromMemory(start,n),"wind state reloads");coop_frames(4,0,0);
+  same(expected,en,actual,RtlSaveSnapshotToMemory(actual,cap),"wind snapshot replay is deterministic");
+  puts("MMX CO-OP EAGLE WIND CHECKS PASSED");
+}
+
+static bool drex_move_probe;
+static void drex_carry_probe(CpuState *cpu,uint32_t pc) {
+  (void)pc;
+  if(drex_move_probe && cpu->D==0xe68 && g_ram[cpu->D+10]==0x62) {
+    eagle_putword(g_ram+cpu->D+5,eagle_word(g_ram+cpu->D+5)+1);
+    drex_move_probe=false;
+  }
+}
+static void coop_drex_rider_checks(const char *fixture,uint8_t *start,
+    uint8_t *expected,uint8_t *actual,size_t cap) {
+  interp_bridge_add_pre_opcode_hook(0x82c715,drex_carry_probe);
+  for(unsigned roster=0;roster<2;++roster) for(unsigned anchor=0;anchor<2;++anchor) {
+    check(MmxCoopEnable(0) && RtlLoadSnapshot(fixture),"private D-Rex checkpoint loads");
+    MmxCoopCapture(g_ram);MmxCoopState s=MmxCoopGetState();
+    if(roster) {MmxCoopPlayer p=s.players[0];s.players[0]=s.players[1];s.players[1]=p;}
+    unsigned boss=0xe68,x=eagle_word(g_ram+boss+5),y=eagle_word(g_ram+boss+8);
+    check(g_ram[boss+10]==0x62,"slot contains D-Rex's solid lower body");
+    /* Isolate the lower platform: preserve head state for boss coordination,
+     * but omit its solid update so landing cannot stop on the upper head. */
+    g_ram[0xea8]=0;
+    for(unsigned seat=0;seat<2;++seat) {
+      MmxCoopPlayer *p=&s.players[seat];
+      eagle_putword(p->body+5,x);eagle_putword(p->body+8,y-28);
+      eagle_putword(p->body+0x22,x);eagle_putword(p->body+0x24,y-30);
+      memset(p->body+0x1a,0,4);p->body[2]=8;p->body[3]=2;
+      p->body[0x2b]=p->body[0x2c]=0;p->body[0x26]=127;p->body[0x27]=0x98;
+      p->status=MMX_COOP_ALIVE;p->zero.swap_phase=0;
+      memset(p->shots,0,sizeof(p->shots));
+    }
+    s.current=s.anchor=(uint8_t)anchor;s.scene_owner=s.scene_phase=s.stage_pending=0;
+    memcpy(g_ram+0xba8,s.players[anchor].body,sizeof(s.players[0].body));
+    MmxZeroSetState(s.players[anchor].zero);MmxCoopSetState(&s);
+    unsigned together=0;
+    for(unsigned tick=0;tick<8;++tick) {
+      coop_frames(1,0,0);s=MmxCoopGetState();
+      if((g_ram[boss+0x3f]&3)==3) ++together;
+      if(tick%10==0) fprintf(stderr,"D-Rex roster=%u anchor=%u t=%u body=%u/%u boss=%u/%u riders=%u ground=%u/%u\n",
+        roster,anchor,tick,coop_y(&s.players[0]),coop_y(&s.players[1]),
+        eagle_word(g_ram+boss+5),eagle_word(g_ram+boss+8),g_ram[boss+0x3f],
+        s.players[0].body[0x2c],s.players[1].body[0x2c]);
+    }
+    check(together>=5,"both characters land on and remain riders of D-Rex");
+    check(abs((int)coop_x(&s.players[0])-(int)coop_x(&s.players[1]))<=2,
+      "D-Rex movement carries both riders equally");
+    unsigned bx=eagle_word(g_ram+boss+5),px[2]={coop_x(&s.players[0]),coop_x(&s.players[1])};
+    /* The owner's lower body is stationary in this phase. Introduce one
+     * pixel of movement at the actual native carry call, once for both seats. */
+    drex_move_probe=true;
+    coop_frames(1,0,0);s=MmxCoopGetState();
+    int dx=(int)eagle_word(g_ram+boss+5)-(int)bx;
+    fprintf(stderr,"D-Rex carry delta=%d players=%d/%d\n",dx,
+      (int)coop_x(&s.players[0])-(int)px[0],(int)coop_x(&s.players[1])-(int)px[1]);
+    check(dx!=0 && (int)coop_x(&s.players[0])-(int)px[0]==dx &&
+      (int)coop_x(&s.players[1])-(int)px[1]==dx,"moving D-Rex carries each actual rider");
+    size_t n=RtlSaveSnapshotToMemory(start,cap);
+    coop_frames(5,0,0);size_t en=RtlSaveSnapshotToMemory(expected,cap);
+    check(RtlLoadSnapshotFromMemory(start,n),"D-Rex riders reload");coop_frames(5,0,0);
+    same(expected,en,actual,RtlSaveSnapshotToMemory(actual,cap),"D-Rex rider ownership replays deterministically");
+  }
+  puts("MMX CO-OP D-REX RIDER CHECKS PASSED");
+}
+
 static void coop_x1_effect_checks(const char *fixture) {
   check(MmxCoopEnable(0) && RtlLoadSnapshot(fixture),"X1 effect fixture loads");
   check(g_ram[0xbdb]==4,"Sting fixture has native Chameleon Sting selected");

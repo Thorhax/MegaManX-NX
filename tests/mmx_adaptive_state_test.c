@@ -15,6 +15,9 @@ static void frame(unsigned input) {
   MmxBeforeFrame();
   if(getenv("MMX_COOP_VIEWS_TEST") || getenv("MMX_COOP_VIEWS_BOOT_TEST") ||
       getenv("MMX_COOP_ONLINE_FIXTURE")) MmxCoopViewsSetOnline(true);
+  if(!MmxReplayPlaying() && getenv("MMX_REPLAY_TEST") && !strcmp(getenv("MMX_REPLAY_TEST"),"online")) {
+    MmxCoopViewsSetIndependent(true);MmxCoopViewsSetOnline(true);MmxRendererSetPeerView(1);
+  }
   RtlRunFrame(input | (1u << 30));
   CaptureSimulationFrame(1);
 }
@@ -50,6 +53,10 @@ static void zero_capture(const char *base, const char *suffix) {
 #include "mmx_netplay_test.inc"
 #include "mmx_zero_modern_test.inc"
 #include "mmx_graphics_pacing_test.inc"
+#include "mmx_hitbox_overlay_test.inc"
+#include "mmx_saber_lock_test.inc"
+#include "mmx_coop_replay_test.inc"
+#include "mmx_diagnostic_replay_test.inc"
 static void zero_motion_checks(const char *fixture) {
   const char *path = getenv("MMX_ZERO_MOTION_REFERENCE");
   if (!path) path = MMX_ZERO_MOTION_REFERENCE_DEFAULT;
@@ -1941,8 +1948,22 @@ int main(int argc, char **argv) {
   uint8 *start = malloc(cap), *expected = malloc(cap), *actual = malloc(cap);
   const char *zero_assets = getenv("MMX_ZERO_TEST_ASSETS");
   const char *zero_title = getenv("MMX_ZERO_TITLE_FIXTURE");
+  if(getenv("MMX_REPLAY_TEST")) { diagnostic_replay_checks(zero_assets,getenv("MMX_REPLAY_TEST")); return 0; }
   if(getenv("MMX_COOP_VIEWS_BOOT_TEST")) {
     coop_view_boot_checks(zero_assets,start,expected,actual,cap);return 0;
+  }
+  if(getenv("MMX_COOP_REPLAY")) { coop_replay_probe(zero_assets,getenv("MMX_COOP_REPLAY")); return 0; }
+  if(getenv("MMX_COOP_ZERO_SLOPE_FIXTURE")) { coop_zero_slope_burst_checks(zero_assets,getenv("MMX_COOP_ZERO_SLOPE_FIXTURE")); return 0; }
+  if(getenv("MMX_COOP_ARMOR_PILOT_FIXTURE")) { coop_armor_pilot_checks(zero_assets,getenv("MMX_COOP_ARMOR_PILOT_FIXTURE")); return 0; }
+  if(getenv("MMX_COOP_ARMOR_FIXTURE")) { coop_armor_checks(zero_assets,getenv("MMX_COOP_ARMOR_FIXTURE")); return 0; }
+  if(getenv("MMX_COOP_CANISTER_FIXTURE")) { coop_canister_checks(zero_assets,getenv("MMX_COOP_CANISTER_FIXTURE")); return 0; }
+  if(getenv("MMX_COOP_SLAB_DROP_TEST")) { coop_slab_drop_checks(zero_assets,getenv("MMX_COOP_SLAB_DROP_TEST")); return 0; }
+  if(getenv("MMX_COOP_COLLAPSE_TEST")) { coop_collapse_checks(zero_assets,getenv("MMX_COOP_COLLAPSE_TEST")); return 0; }
+  if(getenv("MMX_SABER_LOCK_TEST")) {
+    saber_lock_checks(zero_assets,start,cap);return 0;
+  }
+  if(getenv("MMX_HITBOX_OVERLAY_TEST")) {
+    hitbox_overlay_checks(zero_assets,start,expected,actual,cap);return 0;
   }
   if (getenv("MMX_GRAPHICS_PACING_TEST")) {
     graphics_pacing_checks(zero_assets, start, expected, actual, cap);

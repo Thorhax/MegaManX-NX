@@ -115,6 +115,12 @@ regen_variant() {
       --analysis-backend "$ANALYSIS_BACKEND" \
       "${emit_extra[@]}"
 
+  if [ "$name" = usa ]; then
+    step "Annotating USA code from the pinned DiztinGUIsh metadata"
+    "$PYTHON" tools/diz_annotations.py --game x1 --rom "$rom" \
+        --annotate-generated "$out_dir"
+  fi
+
   step "Syncing $name funcs.h"
   "$PYTHON" "$SNESRECOMP_ROOT/tools/v2_sync_funcs_h.py" --cfg-dir "$cfg_dir" \
       --out "$funcs_h"
@@ -126,6 +132,10 @@ regen_variant() {
         --cfg-dir "$cfg_dir" --out-dir "$tmp_gen" --cfg-roots \
         --analysis-backend "$ANALYSIS_BACKEND" \
         "${emit_extra[@]}"
+    if [ "$name" = usa ]; then
+      "$PYTHON" tools/diz_annotations.py --game x1 --rom "$rom" \
+          --annotate-generated "$tmp_gen"
+    fi
     "$PYTHON" "$SNESRECOMP_ROOT/tools/v2_compare_output.py" \
         --expected "$out_dir" --actual "$tmp_gen"
     rm -rf "$tmp_gen"

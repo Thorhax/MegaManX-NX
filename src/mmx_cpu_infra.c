@@ -1,5 +1,6 @@
 #include "common_cpu_infra.h"
 #include "mmx_rtl.h"
+#include "mmx_replay.h"
 
 /* MMX_VARIANT_JP is a per-target compile-def (RockmanXSNESRecomp sets =1;
  * the USA MegaManX target leaves it undefined). Guard so this file compiles
@@ -27,4 +28,6 @@ const RtlGameInfo kMmxGameInfo = {
   .state_load_extra = &MmxStateLoadExtra,
   .on_state_loaded = &MmxOnStateLoaded,
   .hardware_reset = &MmxOnHardwareReset,
+  .frame_begin = &MmxReplayBegin,
+  .frame_end = &MmxReplayEnd,
 };

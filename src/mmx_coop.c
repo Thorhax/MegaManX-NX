@@ -60,12 +60,15 @@ static void sound(uint8_t *r,unsigned command) {
   unsigned i=r[0xba3]&30;r[0xb72+i]=(uint8_t)command;r[0xb73+i]=0;r[0xba3]=(uint8_t)((i+2)&30);
 }
 /* Host-only opt-in trace. Never changes WRAM, scheduling or serialized state.
- * Keep two bounded CSV segments so a long play session cannot fill the disk.
+ * Rotates through numbered 32 MiB CSV segments and keeps the newest
+ * DIAGNOSTIC_SEGMENTS, so a full playthrough survives but disk use is bounded.
  * Rollback/replayed frames retain their original guest counters and a distinct
  * host sequence number rather than being mistaken for consecutive simulation. */
+enum { DIAGNOSTIC_SEGMENTS = 32 };
 typedef struct DiagnosticFile {
   FILE *file;
-  char path[2048], previous[2064];
+  char stem[2048], path[2064];
+  unsigned segment;
   long bytes;
   bool checked;
 } DiagnosticFile;
@@ -88,8 +91,12 @@ void MmxCoopSetDiagnosticsEnabled(bool active) {
   diagnostic_sequence=diagnostic_rows=0;
   diagnostic_enabled=active;
 }
+/* Segment <segment> of a trace: <stem>-001.csv, <stem>-002.csv, ... */
+static void diagnostic_segment_path(const DiagnosticFile *t,unsigned segment,char *out,size_t cap) {
+  snprintf(out,cap,"%s-%03u.csv",t->stem,segment);
+}
 /* Both traces of one session share a stem, so they sort and pair together:
- * logs/coop-physics-<time>-<pid>-<n>.csv and logs/coop-netplay-<same>.csv. */
+ * logs/coop-physics-<time>-<pid>-<n>-<segment>.csv and logs/coop-netplay-<same>. */
 static FILE *diagnostic_open(DiagnosticFile *t,const char *kind) {
   if (t->checked) return t->file;
   t->checked=true;
@@ -104,26 +111,30 @@ static FILE *diagnostic_open(DiagnosticFile *t,const char *kind) {
 #endif
     ++diagnostic_session;
   }
-  snprintf(t->path,sizeof(t->path),"logs/coop-%s-%s-%lu-%u.csv",
+  snprintf(t->stem,sizeof(t->stem),"logs/coop-%s-%s-%lu-%u",
       kind,diagnostic_stamp,diagnostic_pid,diagnostic_session);
-  snprintf(t->previous,sizeof(t->previous),"%s.previous.csv",t->path);
+  t->segment=1;diagnostic_segment_path(t,t->segment,t->path,sizeof(t->path));
   t->file=fopen(t->path,"wb");
   if (!t->file) {fprintf(stderr,"[coop-%s] cannot open %s\n",kind,t->path);return NULL;}
-  fprintf(stderr,"[coop-%s] recording %s (32 MiB per segment, plus previous segment)\n",kind,t->path);
+  fprintf(stderr,"[coop-%s] recording %s (32 MiB per segment, newest %u kept)\n",
+      kind,t->path,(unsigned)DIAGNOSTIC_SEGMENTS);
   return t->file;
 }
-/* Keep two bounded segments so a long play session cannot fill the disk. */
+/* Start the next numbered segment; drop the one that leaves the window. */
 static FILE *diagnostic_ready(DiagnosticFile *t,const char *kind,const char *header) {
   if (!diagnostic_open(t,kind)) return NULL;
   if (t->bytes>=32L*1024*1024) {
     fclose(t->file);t->file=NULL;
-    /* Both filenames belong exclusively to this explicitly requested trace. */
-    remove(t->previous);
-    if (rename(t->path,t->previous)) {
-      fprintf(stderr,"[coop-%s] rotation failed; recording stopped\n",kind);return NULL;
+    ++t->segment;
+    if (t->segment>DIAGNOSTIC_SEGMENTS) {
+      /* Every segment of this stem belongs to this explicitly requested trace. */
+      char old[2064];
+      diagnostic_segment_path(t,t->segment-DIAGNOSTIC_SEGMENTS,old,sizeof(old));
+      remove(old);
     }
+    diagnostic_segment_path(t,t->segment,t->path,sizeof(t->path));
     t->file=fopen(t->path,"wb");
-    if (!t->file) return NULL;
+    if (!t->file) {fprintf(stderr,"[coop-%s] cannot open %s; recording stopped\n",kind,t->path);return NULL;}
     t->bytes=0;
   }
   if (!t->bytes) t->bytes=fprintf(t->file,"%s",header);
@@ -320,11 +331,22 @@ void MmxCoopReset(void) {
     MmxZeroSetState(z);
   }
 }
+/* A Zero extension (Saber) belongs to Zero's seat. X's controller pass and a
+ * ghost replay, whose RAM is rolled back afterwards, must not advance it. */
+static bool ghost_active(void);
+static bool zero_seat_owns_extension(void) {
+  return !enabled || !state.initialized || (!ghost_active() && MmxZeroActive());
+}
 bool MmxCoopEnable(unsigned character) {
   if (character > MMX_COOP_ZERO || !MmxZeroEnabled()) return false;
-  starting_character = character; enabled = true; MmxCoopReset(); return true;
+  starting_character = character; enabled = true; MmxCoopReset();
+  MmxZeroSetExtensionGate(zero_seat_owns_extension);
+  return true;
 }
-void MmxCoopDisable(void) { enabled = false; starting_character = 0; MmxCoopReset(); }
+void MmxCoopDisable(void) {
+  enabled = false; starting_character = 0; MmxCoopReset();
+  MmxZeroSetExtensionGate(NULL);
+}
 MmxCoopState MmxCoopGetState(void) { return state; }
 bool MmxCoopValidState(const MmxCoopState *s) {
   if (!s || s->initialized > 1 || s->current > 1 || s->controller_pass > 2 ||
@@ -333,7 +355,7 @@ bool MmxCoopValidState(const MmxCoopState *s) {
       s->select_hold>180 || s->select_armed>1 || s->stage_pending>2 || /* Accept older 3-second hold saves. */
       s->menu_owner>2 || s->menu_last>1 || s->p1_select_hold>90 || s->p1_select_armed>1 ||
       s->pickup_pass>2 || s->pickup_reserved[0] || s->pickup_reserved[1] || s->pickup_reserved[2] ||
-      s->anchor>1 || s->solo_death[0]>1 || s->solo_death[1]>1 || s->death_reserved ||
+      s->anchor>1 || s->solo_death[0]>1 || s->solo_death[1]>1 || s->respawn_pending>3 ||
       s->scene_owner>2 || s->scene_phase>3 || s->door_pass>2 || s->scene_reserved || s->slime_p2>255 ||
       (s->scene_phase && !s->scene_owner) ||
       (s->door_pass && s->door_entry!=0xe70d && s->door_entry!=0xec98 && s->door_entry!=0xc0ae)) return false;
@@ -395,7 +417,7 @@ bool MmxCoopSelect(uint8_t *r, unsigned player) {
   memcpy(r + 0x1228, p->shots, sizeof(p->shots));
   for (unsigned n = 0; n < 16; ++n)
     r[0x1f87 + n] = p->energy[n] | ((n & 1) ? r[0x1f87 + n] & 0xc0 : 0);
-  MmxZeroSetState(p->zero);
+  MmxZeroSelectState(p->zero);
   MmxWeaponsSetState(p->weapons);
   MmxWeaponsSetCombatState(p->combat);
   MmxWeaponsPartnerCombat(&state.players[player^1].combat);
@@ -458,9 +480,12 @@ void MmxCoopInitialize(uint8_t *r) {
   MmxWeaponsPartnerCombat(&partner->combat);
 }
 static void lift_close(void);
+static bool input_previous_valid[2]; /* see MmxCoopApplyInput */
+static uint16_t input_previous[2];
 bool MmxCoopFrameTick(uint8_t *r) {
   if (!enabled || !state.initialized) return MmxWeaponsFrameTick(r);
   lift_close(); /* an elevator query never spans a frame */
+  input_previous_valid[0] = input_previous_valid[1] = false;
   if (g_mmx_coop_trace) {MmxCoopTraceFrameBegin(&state);TRACE(FRAME,0,0,0,NULL);}
   /* The stage-clear weapon demonstration reuses the native player/shot
    * pools. It owns that single scripted actor; projecting either stored
@@ -491,7 +516,7 @@ bool MmxCoopFrameTick(uint8_t *r) {
     MmxWeaponsSetState(weapons);
     MmxCoopCapture(r);state.stage=r[0x1f7a];state.players[0].status=MMX_COOP_ALIVE;
     memset(state.pickup_owner,0,sizeof(state.pickup_owner));state.pickup_pass=0;
-    memset(state.solo_death,0,sizeof(state.solo_death));
+    memset(state.solo_death,0,sizeof(state.solo_death));state.respawn_pending=0;
     state.scene_owner=state.scene_phase=state.door_pass=0;
     MmxCoopPlayer *p=&state.players[1];p->status=MMX_COOP_ABSENT;
     /* Match native P1's buster reset, for X1 and imported selections alike.
@@ -571,6 +596,19 @@ void MmxCoopPoll(uint16_t p1, uint16_t p2) {
     state.players[i].input = inputs[i];
   }
 }
+void MmxCoopSeatButtons(bool *x_held, bool *y_pressed) {
+  /* Seat input bit n is joypad bit 15-n: Y is bit 1 and X is bit 9. */
+  const MmxCoopPlayer *p = &state.players[state.current];
+  bool live = enabled && state.initialized;
+  if (x_held) *x_held = live && (p->input & (1u << 9));
+  if (y_pressed) *y_pressed = live && (p->pressed & (1u << 1));
+}
+/* A seat's previous actions, taken at its first MmxCoopApplyInput of the
+ * frame. Later calls in the same frame (pilot selection at frame start, then
+ * the $00:E57F mapper hook) must not read them back from the body snapshot:
+ * the first call already wrote this frame's actions there, which made every
+ * press read as held. Cleared by MmxCoopFrameTick, so it never spans a frame
+ * (rollback replays start at a frame boundary). */
 void MmxCoopApplyInput(uint8_t *r) {
   if (!enabled || !state.initialized || !r) return;
   unsigned input = state.players[state.current].input, native = 0;
@@ -586,7 +624,12 @@ void MmxCoopApplyInput(uint8_t *r) {
   }
   /* Native input mapping writes port 1 into the projected body. Seat 2 takes
    * its previous actions from its own preceding frame snapshot. */
-  unsigned previous = word(state.players[state.current].body+0x36);
+  unsigned seat = state.current & 1;
+  if (!input_previous_valid[seat]) {
+    input_previous[seat] = (uint16_t)word(state.players[state.current].body+0x36);
+    input_previous_valid[seat] = true;
+  }
+  unsigned previous = input_previous[seat];
   r[0xbe0] = (uint8_t)previous; r[0xbe1] = (uint8_t)(previous >> 8);
   r[0xbde] = (uint8_t)actions; r[0xbdf] = (uint8_t)(actions >> 8);
   r[0xbe2] = (uint8_t)(actions & ~previous); r[0xbe3] = (uint8_t)((actions & ~previous) >> 8);
@@ -600,13 +643,19 @@ static void place_other(uint8_t *r,uint16_t x,uint16_t y,bool preserve) {
   /* Use native player setup fields, but never inherit P1's hurt, charge,
    * movement or weapon counters. Personal inventory survives withdrawal. */
   memcpy(p->body, source->body, sizeof(p->body));
-  /* $0C38..$0C97 are the three armor-part objects. Only the same character
-   * can share them: X returning beside a world-driving Zero (who opened the
-   * boss door) took Zero's slots and lost his helmet/arm/boot sprites. */
-  uint8_t armor[0x60];memcpy(armor,p->character==source->character ? source->auxiliaries :
-      p->auxiliaries,sizeof(armor));
   memset(p->auxiliaries,0,sizeof(p->auxiliaries));memset(p->shots,0,sizeof(p->shots));
-  memcpy(p->auxiliaries,armor,sizeof(armor));
+  /* X may be joining for the first time, or returning after native death
+   * cleared his old objects. Rebuild acquired parts as $81:9D88..9DC7 does
+   * at stage entry. Neither Zero's slots nor X's previous slots describe
+   * the current shared upgrades reliably (#108). Their native object
+   * initializers fill the pose/position fields on the next controller pass. */
+  if(p->character==MMX_COOP_X) {
+    p->body[0x16]=(r[0x1f99]&1)?0x18:0;
+    for(unsigned part=0;part<3;++part) if(r[0x1f99]&(2u<<part)) {
+      uint8_t *o=p->auxiliaries+part*0x20;
+      o[0]=1;o[0x0b]=(uint8_t)part;o[0x10]=0x5d;
+    }
+  }
   memset(&p->combat,0,sizeof(p->combat));memset(&p->zero,0,sizeof(p->zero));
   p->zero.active_x=p->character==MMX_COOP_X;
   memset(p->body+0x28,0,sizeof(p->body)-0x28);
@@ -700,6 +749,26 @@ static bool teleport_tick(uint8_t *r,MmxCoopPlayer *p) {
   }
   return !z->swap_phase;
 }
+/* $0C16 names the action a script forces on the world actor ($84:9FEB..A07D):
+ * door walks ($18), boss intros ($3A/$1E), and so on; $84:A003 clears it.
+ * The script then belongs to that body until it releases it. */
+static bool world_scripted(const uint8_t *r) {
+  const uint8_t *world=state.anchor==state.current ? r+0xba8 : state.players[state.anchor].body;
+  return world[0x6e]!=0;
+}
+/* A boss or miniboss fight: $1F0E holds the boss whose health meter the HUD
+ * draws ($80:DA0E; each boss stores its own slot there), and the encounter
+ * classes cover intros before the meter appears and minibosses, which have
+ * none. Velguarder ($26) and Vile ($67/$69) are the boss bodies themselves. */
+static bool boss_fight(const uint8_t *r) {
+  if(word(r+0x1f0e)) return true;
+  for(unsigned d=0xe68;d<0x1228;d+=64) {
+    unsigned c=r[d+10];
+    if(r[d] && (MmxWidePolicy_IsBossEncounter((uint8_t)c) || c==0x26 || c==0x67 ||
+        c==0x69 || c==0x01 /* Sting Chameleon's miniboss, $83:AE81 */)) return true;
+  }
+  return false;
+}
 /* Solid terrain somewhere between the body and the level's lowest camera
  * position: falling off the bottom of the screen there is not a pit. */
 static bool floor_below(const uint8_t *r,const uint8_t *b) {
@@ -721,7 +790,20 @@ static bool vile_capture(const uint8_t *r) {
   return false;
 }
 static bool vile_script_object(unsigned d) {
-  if(g_ram[0x1f7a]!=9 || !g_ram[d]) return false;
+  if(!g_ram[d]) return false;
+  if(g_ram[0x1f7a]==0) {
+    if(d>=0xe68 && d<0x1228 && !((d-0xe68)%64)) {
+      unsigned c=g_ram[d+10];
+      /* The Highway ship loads Vile's music before spawning him. Replaying
+       * this controller for P2 restores WRAM's old audio acknowledgement,
+       * but the SPC has already accepted the upload: the real pass then
+       * waits forever for an acknowledgement that can no longer arrive.
+       * Vile and story Zero likewise run their scripts only once. */
+      return c==0x1a || c==0x32 || c==0x33;
+    }
+    return false;
+  }
+  if(g_ram[0x1f7a]!=9) return false;
   if(d>=0xe68 && d<0x1228 && !((d-0xe68)%64)) {
     unsigned c=g_ram[d+10];
     return c==0x66 || c==0x64 || (c==0x67 && g_ram[d+1]<4) ||
@@ -766,7 +848,10 @@ static bool scene_tick(uint8_t *r) {
     bool low[2];
     for(unsigned seat=0;seat<2;++seat) {
       const uint8_t *b=state.players[seat].body;
-      low[seat]=(int)word(b+8)-32>=(int)word(r+0x1e50)+224 && floor_below(r,b);
+      /* A scripted door scroll moves the lower bound up past a partner
+       * who is still climbing (Sigma 4's gate shaft): not a pit either. */
+      low[seat]=(int)word(b+8)-32>=(int)word(r+0x1e50)+224 &&
+          (floor_below(r,b) || (seat!=state.anchor && world_scripted(r)));
     }
     const uint8_t *b=state.players[state.anchor^1].body,*a=state.players[state.anchor].body;
     int dx=(int)word(b+5)-(int)word(a+5),dy=(int)word(b+8)-(int)word(a+8);
@@ -878,6 +963,15 @@ static struct {
 static struct {
   uint8_t pass,first,original,p,db,rp,rdb;uint16_t d,s,a,x,y,ra,rx,ry;
 } elevator_move;
+static struct {
+  uint8_t pass,first,entry_2c,first_rode,p,db,rp,rdb;uint16_t d,s,a,x,y,ra,rx,ry;
+} slab_drop;
+static struct {
+  uint8_t pass,first,p,db,rp,rdb;uint16_t d,s,a,x,y,ra,rx,ry;
+} canister_side;
+static struct {
+  uint8_t pass,first,p,db,rp,rdb;uint16_t s,a,x,y,ra,rx,ry;
+} armor_board;
 static uint32_t lift_stack_ret(const CpuState *cpu) {
   return cpu->S<0x1ffd ? (uint32_t)(g_ram[cpu->S+1]|g_ram[cpu->S+2]<<8|g_ram[cpu->S+3]<<16) : 0;
 }
@@ -902,14 +996,16 @@ static bool lift_elevator(unsigned d) {
    * Storm Eagle's E-tank elevator top ($59) and its column ($5A, 83 px
    * below), Flame Mammoth's scrap blocks dropped onto the conveyor
    * ($2A, from $87:9C7B/9D89), Armored Armadillo's minecart ($2B), and
-   * Kuwanger's red moving platforms ($3F). */
+   * Kuwanger's red moving platforms ($3F), and D-Rex's lower body ($62).
+   * Also the canister ($4D, $87:CB30/CB46) that Chill Penguin's stage drops
+   * from a hovering carrier: without a pass Zero walked through it. */
   if(d<0xe68 || d>=0x1228 || (d-0xe68)%64 || !g_ram[d]) return false;
   unsigned c=g_ram[d+10];
-  return c==0x59 || c==0x5a || c==0x2a || c==0x2b || c==0x3f;
+  return c==0x59 || c==0x5a || c==0x2a || c==0x2b || c==0x3f || c==0x62 || c==0x4d;
 }
 static void laser_reset(void);
 static void lift_reset(void) {
-  lift.pass=0;lift.carry=0;cart.ready=false;cart.pass=0;elevator_move.pass=0;laser_reset();
+  lift.pass=0;lift.carry=0;cart.ready=false;cart.pass=0;elevator_move.pass=0;slab_drop.pass=0;canister_side.pass=0;armor_board.pass=0;laser_reset();
 }
 static void lift_close(void) {
   if(lift.pass==2) MmxCoopSelect(g_ram,lift.first);
@@ -962,7 +1058,7 @@ static void kuwanger_lift_hook(CpuState *cpu,uint32_t pc) {
 static void kuwanger_carry_hook(CpuState *cpu,uint32_t pc) {
   unsigned d=cpu->D;
   if(!enabled || !state.initialized || d<0xe68 || d>=0x1228 || (d-0xe68)%64 ||
-      !g_ram[d] || (g_ram[d+10]!=0x3d && g_ram[d+10]!=0x3f)) return;
+      !g_ram[d] || (g_ram[d+10]!=0x3d && g_ram[d+10]!=0x3f && g_ram[d+10]!=0x62)) return;
   if((pc&65535)==0xc715) {
     if(elevator_move.pass) return;
     unsigned riders=g_ram[d+0x3f]&3;
@@ -993,6 +1089,125 @@ static void kuwanger_carry_hook(CpuState *cpu,uint32_t pc) {
     cpu->P=elevator_move.rp;cpu->DB=elevator_move.rdb;cpu_p_to_mirrors(cpu);
   }
   elevator_move.pass=0;
+}
+
+/* Highway's falling slab (item $08) starts its fall in a one-frame state
+ * ($82:E62A). Its $E64E..E666 block reads the world body directly: a body on
+ * the ground ($0BD3 bit 2) is moved down 2 px with the slab, gets $0BD4 bit 2,
+ * and is latched as a rider (INC .2C), so $84:AB81 carries it a tick longer
+ * before it falls free. Only the anchor ever saw that block, so the partner
+ * left the road a tick early, fell a few px ahead, and reached the slab five
+ * ticks before X (MMX netplay log 2026-10-09: X's jump, pressed on his
+ * native landing frame, was dropped while P2's was not). Replay the block for
+ * the partner with its own body, as native code, and keep each seat's latch
+ * as its .2C bit for platform_hook. */
+static void slab_drop_hook(CpuState *cpu,uint32_t pc) {
+  unsigned d=cpu->D;
+  if(!enabled || !state.initialized || state.menu_owner || state.scene_owner ||
+      d<0x1628 || d>=0x1928 || (d-0x1628)%48 || !g_ram[d] || g_ram[d+10]!=0x08) return;
+  if((pc&65535)==0xe64e) {
+    if(slab_drop.pass || state.players[state.current^1].status!=MMX_COOP_ALIVE ||
+        !(state.players[state.current^1].body[0x27]&127)) return;
+    cpu_mirrors_to_p(cpu);
+    slab_drop.pass=1;slab_drop.first=state.current;slab_drop.d=(uint16_t)d;slab_drop.s=cpu->S;
+    slab_drop.a=cpu->A;slab_drop.x=cpu->X;slab_drop.y=cpu->Y;slab_drop.p=cpu->P;slab_drop.db=cpu->DB;
+    slab_drop.entry_2c=g_ram[d+0x2c];return;
+  }
+  if(!slab_drop.pass || slab_drop.d!=d || slab_drop.s!=cpu->S) return;
+  if(slab_drop.pass==1) {
+    slab_drop.first_rode=g_ram[d+0x2c]!=slab_drop.entry_2c;
+    cpu_mirrors_to_p(cpu);
+    slab_drop.ra=cpu->A;slab_drop.rx=cpu->X;slab_drop.ry=cpu->Y;slab_drop.rp=cpu->P;slab_drop.rdb=cpu->DB;
+    MmxCoopSelect(g_ram,slab_drop.first^1);slab_drop.pass=2;g_ram[d+0x2c]=slab_drop.entry_2c;
+    cpu->A=slab_drop.a;cpu->X=slab_drop.x;cpu->Y=slab_drop.y;cpu->P=slab_drop.p;cpu->DB=slab_drop.db;
+    cpu_p_to_mirrors(cpu);
+    interp_bridge_pre_opcode_redirect(0x82e64e);return;
+  }
+  bool second_rode=g_ram[d+0x2c]!=slab_drop.entry_2c;
+  g_ram[d+0x2c]=(uint8_t)((slab_drop.entry_2c&~3u)|(slab_drop.first_rode?1u<<slab_drop.first:0)|
+                          (second_rode?1u<<(slab_drop.first^1):0));
+  MmxCoopSelect(g_ram,slab_drop.first);
+  cpu->A=slab_drop.ra;cpu->X=slab_drop.rx;cpu->Y=slab_drop.ry;cpu->P=slab_drop.rp;cpu->DB=slab_drop.rdb;
+  cpu_p_to_mirrors(cpu);
+  slab_drop.pass=0;
+}
+
+/* After each $82:D7D7 box, the canister ($4D) calls $84:9A02, which tests
+ * the world body ($0BA8) against the same box and sets its side-contact bits
+ * ($0BD4 bits 7/6). D7D7 already runs for both seats (lift_elevator); run
+ * this one for the partner's own body too, as native code. Nothing else
+ * calls $84:9A02. */
+static void canister_side_hook(CpuState *cpu,uint32_t pc) {
+  unsigned d=cpu->D;
+  if(!enabled || !state.initialized || state.menu_owner || state.scene_owner ||
+      d<0xe68 || d>=0x1228 || (d-0xe68)%64 || !g_ram[d] || g_ram[d+10]!=0x4d) return;
+  if((pc&65535)==0x9a02) {
+    if(canister_side.pass || state.players[state.current^1].status!=MMX_COOP_ALIVE ||
+        !(state.players[state.current^1].body[0x27]&127)) return;
+    cpu_mirrors_to_p(cpu);
+    canister_side.pass=1;canister_side.first=state.current;canister_side.d=(uint16_t)d;canister_side.s=cpu->S;
+    canister_side.a=cpu->A;canister_side.x=cpu->X;canister_side.y=cpu->Y;
+    canister_side.p=cpu->P;canister_side.db=cpu->DB;return;
+  }
+  /* $84:9A23 is the routine's only RTL; the stack check pairs it with this call. */
+  if(!canister_side.pass || canister_side.d!=d || canister_side.s!=cpu->S) return;
+  if(canister_side.pass==1) {
+    cpu_mirrors_to_p(cpu);
+    canister_side.ra=cpu->A;canister_side.rx=cpu->X;canister_side.ry=cpu->Y;
+    canister_side.rp=cpu->P;canister_side.rdb=cpu->DB;
+    MmxCoopSelect(g_ram,canister_side.first^1);canister_side.pass=2;
+    cpu->A=canister_side.a;cpu->X=canister_side.x;cpu->Y=canister_side.y;
+    cpu->P=canister_side.p;cpu->DB=canister_side.db;cpu_p_to_mirrors(cpu);
+    interp_bridge_pre_opcode_redirect(0x849a02);return;
+  }
+  MmxCoopSelect(g_ram,canister_side.first);
+  cpu->A=canister_side.ra;cpu->X=canister_side.rx;cpu->Y=canister_side.ry;
+  cpu->P=canister_side.rp;cpu->DB=canister_side.rdb;cpu_p_to_mirrors(cpu);
+  canister_side.pass=0;
+}
+
+/* An empty Ride Armor ($0E18) waiting on the ground boards whoever touches
+ * it: its idle state ($83:8129) tests the world body ($0BA8) through
+ * $84:9C0E at $814A and, on contact, runs the boarding sequence ($83:8605:
+ * pilot action $2C, armor .0A bit 6). Only X was ever tested, so Zero could
+ * not get in. When the first seat does not board, repeat the native test for
+ * the partner's own body; a partner who boards is then kept as the pilot
+ * like any other ($2C, see MmxCoopFrameTick). */
+static void armor_board_hook(CpuState *cpu,uint32_t pc) {
+  if(!enabled || !state.initialized || state.menu_owner || state.scene_owner ||
+      cpu->D!=0xe18 || !g_ram[0xe18]) return;
+  if((pc&65535)==0x814a) {
+    if(armor_board.pass || state.players[state.current^1].status!=MMX_COOP_ALIVE ||
+        !(state.players[state.current^1].body[0x27]&127)) return;
+    cpu_mirrors_to_p(cpu);
+    armor_board.pass=1;armor_board.first=state.current;armor_board.s=cpu->S;
+    armor_board.a=cpu->A;armor_board.x=cpu->X;armor_board.y=cpu->Y;
+    armor_board.p=cpu->P;armor_board.db=cpu->DB;return;
+  }
+  if(!armor_board.pass || armor_board.s!=cpu->S) return;
+  if(armor_board.pass==1 && !(g_ram[0xe22]&0x40)) {
+    cpu_mirrors_to_p(cpu);
+    armor_board.ra=cpu->A;armor_board.rx=cpu->X;armor_board.ry=cpu->Y;
+    armor_board.rp=cpu->P;armor_board.rdb=cpu->DB;
+    MmxCoopSelect(g_ram,armor_board.first^1);armor_board.pass=2;
+    cpu->A=armor_board.a;cpu->X=armor_board.x;cpu->Y=armor_board.y;
+    cpu->P=armor_board.p;cpu->DB=armor_board.db;cpu_p_to_mirrors(cpu);
+    interp_bridge_pre_opcode_redirect(0x83814a);return;
+  }
+  if(armor_board.pass==2) {
+    if(g_ram[0xe22]&0x40) {
+      /* The partner boarded: the rest of the armor's update moves its pilot
+       * (the world body), so the pilot becomes the anchor now, as the pilot
+       * selection in MmxCoopFrameTick would next frame, with its own input. */
+      state.anchor=state.current;
+      if(state.current==1) MmxCoopApplyInput(g_ram);
+    } else {
+      MmxCoopSelect(g_ram,armor_board.first);
+      cpu->A=armor_board.ra;cpu->X=armor_board.rx;cpu->Y=armor_board.ry;
+      cpu->P=armor_board.rp;cpu->DB=armor_board.rdb;cpu_p_to_mirrors(cpu);
+    }
+  }
+  armor_board.pass=0;
 }
 
 /* Laser sensors ($43) test a body directly through $84:9C0E. A successful
@@ -1071,7 +1286,7 @@ static void lift_rtl_hook(CpuState *cpu,uint32_t pc) {
   }
   bool second_rides=g_ram[d+0x2c]&1;
   uint8_t combined=(uint8_t)(lift.first_2c|g_ram[d+0x2c]);
-  if(g_ram[d+10]==0x3f)
+  if(g_ram[d+10]==0x3f || g_ram[d+10]==0x62)
     g_ram[d+0x3f]=(uint8_t)(((lift.first_2c&1)?1u<<lift.first:0)|
         (second_rides?1u<<(lift.first^1):0));
   if(g_ram[d+10]==0x2b) {
@@ -1201,6 +1416,30 @@ static bool living_on_screen(const uint8_t *r,unsigned seat) {
   return p->status==MMX_COOP_ALIVE && (b[0x27]&127) && b[2]!=12 &&
       !p->zero.swap_phase && x+12>0 && x-12<256 && y+16>0 && y+16-height<224;
 }
+/* A fallen player's Select asks to return beside the partner for one of the
+ * team's spare lives ($1F80: $80:9B43 spends one per checkpoint restart, the
+ * 1-up adds one at $81:E4B3). Never during a boss or miniboss fight. The
+ * request waits for both that and a spare life, so a 1-up collected while
+ * none were left brings him straight back. */
+static bool respawn_tick(uint8_t *r,unsigned seat) {
+  MmxCoopPlayer *p=&state.players[seat];
+  unsigned bit=1u<<seat;
+  bool ready=living_on_screen(r,seat^1) && r[0x1f80] && !boss_fight(r);
+  if(p->pressed&4) {
+    state.respawn_pending|=(uint8_t)bit;
+    if(!ready) sound(r,0x74); /* $00:F1E4 password rejection: queued, not yet. */
+  }
+  if(!(state.respawn_pending&bit) || !ready) return false;
+  MmxCoopSelect(r,seat^1);
+  uint16_t x,y;
+  if(!MmxCoopFindLanding(r,&x,&y)) return false;
+  place_other(r,x,y,false); /* full HP and the buster; inventory is kept */
+  --r[0x1f80];state.respawn_pending&=(uint8_t)~bit;
+  MmxZeroState *z=&p->zero;z->swap_phase=4;z->swap_y=(int16_t)(word(r+0x1e50)-(int)y-40);
+  z->swap_tick=z->swap_fraction=0;
+  state.select_armed=state.select_hold=state.p1_select_armed=state.p1_select_hold=0;
+  sound(r,0x0e);r[0xb9d]=r[0xba0]=0;return true;
+}
 static bool join_tick(uint8_t *r) {
   for(unsigned seat=0;seat<2;++seat) {
     MmxCoopPlayer *p=&state.players[seat];
@@ -1217,7 +1456,9 @@ static bool join_tick(uint8_t *r) {
     }
     r[0xb9d]=r[0xba0]=0;return true;
   }
-  bool gameplay=r[0xd1]==2 && r[0xd2]==4 && r[0xd3]==4 && r[0xba9]==2 &&
+  /* No voluntary join or withdrawal while a script holds the world actor.
+   * P1 returning during Sigma 4's intro took the world from the locked Zero. */
+  bool gameplay=r[0xd1]==2 && r[0xd2]==4 && r[0xd3]==4 && r[0xba9]==2 && !world_scripted(r) &&
       (r[0xbcf]&127) && r[0xbaa]!=12 &&
       !r[0x1f0c] && r[0x1f10]<6 && !r[0x1f23] && !r[0x1f48] && !r[0x1f19];
   if (!gameplay) {state.select_hold=state.p1_select_hold=0;return false;}
@@ -1226,7 +1467,8 @@ static bool join_tick(uint8_t *r) {
     uint8_t *hold=seat ? &state.select_hold : &state.p1_select_hold;
     uint8_t *armed=seat ? &state.select_armed : &state.p1_select_armed;
     if (!(p->input&4)) {*armed=1;*hold=0;}
-    if (p->status==MMX_COOP_FALLEN || !living_on_screen(r,seat^1)) {*hold=0;continue;}
+    if (p->status==MMX_COOP_FALLEN) {*hold=0;if(respawn_tick(r,seat)) return true;continue;}
+    if (!living_on_screen(r,seat^1)) {*hold=0;continue;}
     if (p->status==MMX_COOP_ALIVE) {
       /* An occupied armor still updates through its pilot's projected body.
        * Do not hide that body or hand control away during a voluntary exit. */
@@ -1414,11 +1656,12 @@ static void pickup_hook(CpuState *cpu,uint32_t pc) {
  *   world actor projected, so Launch Octopus's upward currents only lifted
  *   the world actor.
  * Before such a run, replay it once with the other seat's body projected,
- * keep only that body's motion result, and restore everything else (WRAM,
- * weapon combat, Zero and co-op state, renderer pieces), so every object
+ * keep only that body's motion result, and restore everything else (WRAM
+ * except the SPC mirror bytes, weapon combat, Zero and co-op state, renderer
+ * pieces), so every object
  * still advances once. Couch co-op only for objects: online views already
  * project the nearest player for AI. */
-enum { GHOST_SHOTS=1, GHOST_OBJECT, GHOST_CURRENT };
+enum { GHOST_SHOTS=1, GHOST_OBJECT, GHOST_CURRENT, GHOST_EAGLE_WIND, GHOST_DREX_CONTACT };
 static struct {
   uint8_t pass,kind,p,db;uint16_t a,x,y,s,d;uint32_t resume;
   uint8_t body[0x90];
@@ -1496,10 +1739,18 @@ static void shot_ghost_begin(CpuState *cpu,unsigned kind,uint32_t resume) {
   memcpy(g_ram+0xba8,shot_ghost.body,sizeof(shot_ghost.body));
   shot_ghost.pass=1;
 }
+/* $7EFFFC..FFFF mirror the sound CPU: the driver's ready flag, current track
+ * and upload handshake counter. A replay that changes music ($80:87A2, e.g.
+ * Velguarder at full HP) really uploads to the SPC, which no WRAM rollback
+ * undoes. Restoring the old counter left the real update spinning forever at
+ * $80:8701 (LDA $7EFFFE / CMP $2142), so these bytes keep the replay's values. */
+enum { GHOST_SPC_MIRROR=0x1fffc };
 static void shot_ghost_end(CpuState *cpu,uint32_t pc) {
   uint8_t result[0x90];memcpy(result,g_ram+0xba8,sizeof(result));
+  uint8_t spc[4];memcpy(spc,g_ram+GHOST_SPC_MIRROR,sizeof(spc));
   memcpy(g_ram,shot_ghost_ram,sizeof(shot_ghost_ram));
-  MmxWeaponsSetCombatState(shot_ghost.combat);MmxZeroSetState(shot_ghost.zero);
+  memcpy(g_ram+GHOST_SPC_MIRROR,spc,sizeof(spc));
+  MmxWeaponsSetCombatState(shot_ghost.combat);MmxZeroSelectState(shot_ghost.zero);
   MmxRendererRewindPieces(shot_ghost.pieces);MmxCoopViewsSetWorldState(&shot_ghost.world);
   state=shot_ghost_state;
   memcpy(&lift,shot_ghost_lift,sizeof(lift));memcpy(&cart,shot_ghost_cart,sizeof(cart));
@@ -1537,6 +1788,38 @@ static void object_ghost_hook(CpuState *cpu,uint32_t pc) {
       (word(g_ram+0xbad)!=object_watch.x || word(g_ram+0xbb0)!=object_watch.y))
     diagnostic_event(g_ram,cpu,pc,"body-moved");
   object_watch.armed=false;
+}
+/* Eagle's wind state directly offsets BA8 by two pixels. Replay only its
+ * height/direction/position check ($87:DAC4..DB0E), before the attack timer
+ * and animation advance. The boss itself must remain a single world actor.
+ * This also works when independent views project a different world seat. */
+static void eagle_wind_hook(CpuState *cpu,uint32_t pc) {
+  if(!enabled || !state.initialized) return;
+  if((pc&65535)==0xdb0e) {
+    if(shot_ghost.pass==1 && shot_ghost.kind==GHOST_EAGLE_WIND) shot_ghost_end(cpu,pc);
+    return;
+  }
+  if(shot_ghost.pass==2 && shot_ghost.kind==GHOST_EAGLE_WIND) {shot_ghost.pass=0;return;}
+  unsigned d=cpu->D;
+  if(shot_ghost.pass || state.menu_owner || state.scene_owner || state.stage_pending ||
+      g_ram[0xd3]!=4 || !ghost_partner_ready() || d<0xe68 || d>=0x1228 ||
+      (d-0xe68)%64 || !g_ram[d] || g_ram[d+10]!=0x52) return;
+  shot_ghost_begin(cpu,GHOST_EAGLE_WIND,pc&0xffffff);
+}
+/* D-Rex's extra body-contact flags follow its ordinary solid query. Keep
+ * those flags private to each body too, without replaying its boss AI. */
+static void drex_contact_hook(CpuState *cpu,uint32_t pc) {
+  if(!enabled || !state.initialized) return;
+  if((pc&65535)==0xc35f) {
+    if(shot_ghost.pass==1 && shot_ghost.kind==GHOST_DREX_CONTACT) shot_ghost_end(cpu,pc);
+    return;
+  }
+  if(shot_ghost.pass==2 && shot_ghost.kind==GHOST_DREX_CONTACT) {shot_ghost.pass=0;return;}
+  unsigned d=cpu->D;
+  if(shot_ghost.pass || state.menu_owner || state.scene_owner || state.stage_pending ||
+      g_ram[0xd3]!=4 || !ghost_partner_ready() || d<0xe68 || d>=0x1228 ||
+      (d-0xe68)%64 || !g_ram[d] || g_ram[d+10]!=0x62) return;
+  shot_ghost_begin(cpu,GHOST_DREX_CONTACT,pc&0xffffff);
 }
 /* Launch Octopus's vortex is effect $16, not the enemy current generator.
  * Its native update ($81:F493) clears/sets BE4 and moves only BA8. Replay
@@ -1602,13 +1885,23 @@ static void object_hook(CpuState *cpu, uint32_t pc) {
  * behavior for a pass already in progress. */
 /* Items whose rider contact goes through $84:AB81/AB56: $0E/$0F/$10/$13/$14
  * use .2C as a boolean rider latch. (Storm Eagle's E-tank elevator, enemy
- * $59, does not call these helpers; see storm-eagle-collision-handoff.md.) */
+ * $59, does not call these helpers; see storm-eagle-collision-handoff.md.)
+ * The helper itself owns .2C (it tests, clears and stores the whole byte).
+ * Highway's collapse after Bee Blader: the road (enemy $22) and the falling
+ * slab (item $08, $82:E66B -> AB81) carry riders the same way. The slab's
+ * one-frame drop state ($82:E62A) latches .2C for a grounded world body
+ * before it starts falling; slab_drop_hook runs that for both seats. Without a
+ * second-seat pass the partner fell through the slab and then stood inside
+ * it on the lower road, unable to move. */
 static bool platform_item(unsigned d) {
-  /* Kuwanger's little lift uses the same helpers from an enemy slot. */
-  if(d>=0xe68 && d<0x1228 && !((d-0xe68)%64)) return g_ram[d] && g_ram[d+10]==0x16;
+  if(d>=0xe68 && d<0x1228 && !((d-0xe68)%64)) {
+    /* Kuwanger's little lift and Highway's collapsing road. */
+    unsigned c=g_ram[d+10];
+    return g_ram[d] && (c==0x16 || c==0x22);
+  }
   if(d<0x1628 || d>=0x1928 || (d-0x1628)%48) return false;
   unsigned c=g_ram[d+10];
-  return (c>=0x0e && c<=0x10) || c==0x13 || c==0x14;
+  return c==0x08 || (c>=0x0e && c<=0x10) || c==0x13 || c==0x14;
 }
 /* Co-op keeps one rider bit per seat in .2C bits 0/1 and projects the current
  * seat's as bit 0 while the native helper runs. */
@@ -1716,7 +2009,8 @@ static void camera_hook(CpuState *cpu,uint32_t pc) {
     /* Below the level's lowest camera position, as online views already
      * use: the screen bottom only moved because the shared camera was pulled
      * up (a capsule's camera lock), and scene_tick beams him over. */
-    if (p->status==MMX_COOP_ALIVE && (p->body[0x27]&127) &&
+    /* While a script holds the world actor, scene_tick beams him instead. */
+    if (p->status==MMX_COOP_ALIVE && (p->body[0x27]&127) && !world_scripted(g_ram) &&
         (int16_t)(word(p->body+8)-32-(word(g_ram+0x1e5c)+224))>=0) {
       TRACE(PIT,pc,state.anchor^1,0,cpu);
       ++p->body[0x30];p->body[0x2f]=8;p->body[0x26]=127;
@@ -2058,6 +2352,10 @@ void MmxCoopRegisterHooks(void) {
     interp_bridge_add_pre_opcode_hook(ghosts[i],object_ghost_hook);
   interp_bridge_add_pre_opcode_hook(0x00d359,current_ghost_hook);
   interp_bridge_add_pre_opcode_hook(0x00d35c,current_ghost_hook);
+  interp_bridge_set_pre_opcode_hook(0x87dac4,eagle_wind_hook);
+  interp_bridge_set_pre_opcode_hook(0x87db0e,eagle_wind_hook);
+  interp_bridge_set_pre_opcode_hook(0x88c333,drex_contact_hook);
+  interp_bridge_set_pre_opcode_hook(0x88c35f,drex_contact_hook);
   const unsigned views[]={0x00dcd7,0x00dd2d,0x82807d,0x82809e,0x8280c3,0x838957};
   for(unsigned i=0;i<sizeof(views)/sizeof(views[0]);++i)
     interp_bridge_set_pre_opcode_hook(views[i],view_world_hook);
@@ -2071,6 +2369,12 @@ void MmxCoopRegisterHooks(void) {
   interp_bridge_set_pre_opcode_hook(0x87af5c,kuwanger_lift_hook);
   interp_bridge_set_pre_opcode_hook(0x82c715,kuwanger_carry_hook);
   interp_bridge_set_pre_opcode_hook(0x82c733,kuwanger_carry_hook);
+  interp_bridge_set_pre_opcode_hook(0x82e64e,slab_drop_hook);
+  interp_bridge_set_pre_opcode_hook(0x82e666,slab_drop_hook);
+  interp_bridge_set_pre_opcode_hook(0x849a02,canister_side_hook);
+  interp_bridge_set_pre_opcode_hook(0x849a23,canister_side_hook);
+  interp_bridge_set_pre_opcode_hook(0x83814a,armor_board_hook);
+  interp_bridge_set_pre_opcode_hook(0x838187,armor_board_hook);
   const unsigned turrets[]={0x87b91c,0x87b92f,0x87ba72,0x87ba5c,0x87bb09,0x87bb0d};
   for(unsigned i=0;i<sizeof(turrets)/sizeof(turrets[0]);++i)
     interp_bridge_set_pre_opcode_hook(turrets[i],laser_target_hook);

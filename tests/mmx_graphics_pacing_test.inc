@@ -8,17 +8,11 @@ static void graphics_checkpoint(uint32_t pc, int m, int x) {
 static void graphics_walk(unsigned count) {
   while (count--) frame(SNES_PAD_RIGHT | SNES_PAD_RIGHT << 12 | (1u << 31));
 }
-static size_t graphics_replay_state(uint8_t *out) {
-  /* Compare the gameplay and graphics affected by this fix. SPC/DSP replay
-   * with extended frame timing has a separate pre-existing missing-clock
-   * defect, tracked as beads-8wg.2.95; do not claim audio determinism here. */
-  size_t n = sizeof(g_ram);
-  memcpy(out, g_ram, n);
-  memcpy(out + n, g_ppu->vram, sizeof(g_ppu->vram)); n += sizeof(g_ppu->vram);
-  memcpy(out + n, g_ppu->cgram, sizeof(g_ppu->cgram)); n += sizeof(g_ppu->cgram);
-  MmxCoopState coop = MmxCoopGetState();
-  memcpy(out + n, &coop, sizeof(coop));
-  return n + sizeof(coop);
+static size_t graphics_replay_state(uint8_t *out, size_t cap) {
+  /* Include SPC/DSP and the carried guest clock as well as WRAM and tiles. */
+  size_t n = RtlSaveSnapshotToMemory(out, cap);
+  check(n != 0, "graphics pacing: complete replay snapshot saves");
+  return n;
 }
 static void graphics_pacing_checks(const char *assets, uint8_t *start,
     uint8_t *expected, uint8_t *actual, size_t cap) {
@@ -92,7 +86,7 @@ static void graphics_pacing_checks(const char *assets, uint8_t *start,
     }
   }
   check(produced == length, "graphics pacing: all decoded bytes match ROM");
-  size_t expected_size = graphics_replay_state(expected);
+  size_t expected_size = graphics_replay_state(expected, cap);
   check(RtlLoadSnapshotFromMemory(start, size), "graphics pacing: in-flight snapshot restores");
   size_t rollback_size = RtlRollbackSaveToMemory(actual, cap);
   check(rollback_size && RtlRollbackLoadFromMemory(actual, rollback_size),
@@ -100,14 +94,14 @@ static void graphics_pacing_checks(const char *assets, uint8_t *start,
   /* Keep the rollback checkpoint while using actual for the replay result. */
   memcpy(start, actual, rollback_size);
   graphics_walk(ticks);
-  size_t actual_size = graphics_replay_state(actual);
+  size_t actual_size = graphics_replay_state(actual, cap);
   same(expected, expected_size, actual, actual_size,
-       "graphics pacing: in-flight save/load reproduces gameplay and graphics");
+       "graphics pacing: in-flight save/load reproduces gameplay, graphics and audio");
   check(RtlRollbackLoadFromMemory(start, rollback_size), "graphics pacing: rewind in-flight task");
   graphics_walk(ticks);
-  actual_size = graphics_replay_state(actual);
+  actual_size = graphics_replay_state(actual, cap);
   same(expected, expected_size, actual, actual_size,
-       "graphics pacing: rollback reproduces gameplay and graphics");
+       "graphics pacing: rollback reproduces gameplay, graphics and audio");
   printf("MMX GRAPHICS PACING PASSED: asset=%02x bytes=%u ticks=%u max_periods=%.6f\n",
          asset, length, ticks, largest);
 }

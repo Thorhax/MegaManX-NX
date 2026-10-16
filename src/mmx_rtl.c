@@ -5,7 +5,9 @@
 #include "mmx_weapons.h"
 #include "mmx_weapon_combat.h"
 #include "mmx_coop.h"
+#include "mmx_knc_bugfix.h"
 #include "mmx_coop_trace.h"
+#include "mmx_replay.h"
 #include "mmx_coop_view.h"
 #include "variables.h"
 #include "common_cpu_infra.h"
@@ -374,7 +376,7 @@ void mmx_host_yield(uint8_t countdown) {
 #include "snes/saveload.h"
 
 #define MMX_SAV_CHUNK_MAGIC   0x4D4D5854u  /* "MMXT" */
-#define MMX_SAV_CHUNK_VERSION 16u /* Independent-view placement history. */
+#define MMX_SAV_CHUNK_VERSION 18u /* Zero extension (Saber) state */
 
 typedef struct MmxSavChunk {
   uint32_t magic, version;
@@ -408,13 +410,15 @@ static MmxZeroState g_load_zero;
 static MmxWeaponsState g_load_weapons;
 static MmxWeaponCombatState g_load_weapon_combat;
 static MmxCoopState g_load_coop;
+static MmxKncBugfixState g_load_knc_bugfix;
 static MmxCoopViewWorldState g_load_views;
+static uint8_t g_load_zero_extension[MMX_ZERO_EXTENSION_STATE_BYTES];
 
 void MmxStateSaveExtra(struct SaveLoadInfo *sli) {
   MmxSavChunk c;
   memset(&c, 0, sizeof(c));
   c.magic = MMX_SAV_CHUNK_MAGIC;
-  c.version = MmxZeroEnabled() ? MMX_SAV_CHUNK_VERSION : MmxWeaponsEnabled() ? 13 : 3;
+  c.version = MMX_SAV_CHUNK_VERSION;
   mmx_save_cpu(&c.main_cpu, &g_cpu);
   for (int i = 0; i < MMX_NSLOTS; i++) {
     c.occupied[i]    = (g_slot_fiber[i] != NULL);
@@ -454,6 +458,11 @@ void MmxStateSaveExtra(struct SaveLoadInfo *sli) {
     MmxCoopViewWorldState views=MmxCoopViewsGetWorldState();
     sli->func(sli,&views,sizeof(views));
   }
+  MmxKncBugfixState knc_bugfix=MmxKncBugfixGetState();
+  sli->func(sli,&knc_bugfix,sizeof(knc_bugfix));
+  uint8_t zero_extension[MMX_ZERO_EXTENSION_STATE_BYTES];
+  MmxZeroExtSaveState(zero_extension);
+  sli->func(sli,zero_extension,sizeof(zero_extension));
 }
 
 void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
@@ -464,7 +473,9 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
   memset(&g_load_weapons, 0, sizeof(g_load_weapons));
   memset(&g_load_weapon_combat, 0, sizeof(g_load_weapon_combat));
   memset(&g_load_coop, 0, sizeof(g_load_coop));
+  memset(&g_load_knc_bugfix,0,sizeof(g_load_knc_bugfix));
   memset(&g_load_views,0,sizeof(g_load_views));
+  memset(g_load_zero_extension,0,sizeof(g_load_zero_extension));
   memset(&g_load_chunk, 0, sizeof(g_load_chunk));
   sli->func(sli, &g_load_chunk, sizeof(g_load_chunk));
   if (g_load_chunk.magic == MMX_SAV_CHUNK_MAGIC &&
@@ -530,6 +541,17 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
           g_load_views.actor_return>2 || g_load_views.contact_player>1) g_load_chunk_ok=0;
     } else g_load_chunk_ok=0;
   }
+  if(g_load_complete && g_load_chunk.version>=17) {
+    if(RtlStateBytesRemaining(sli)>=sizeof(g_load_knc_bugfix)) {
+      sli->func(sli,&g_load_knc_bugfix,sizeof(g_load_knc_bugfix));
+      if(!MmxKncBugfixValidState(&g_load_knc_bugfix)) g_load_chunk_ok=0;
+    } else g_load_chunk_ok=0;
+  }
+  if(g_load_complete && g_load_chunk.version>=18) {
+    if(RtlStateBytesRemaining(sli)>=sizeof(g_load_zero_extension))
+      sli->func(sli,g_load_zero_extension,sizeof(g_load_zero_extension));
+    else g_load_chunk_ok=0;
+  }
   if(g_load_complete && g_load_chunk.version<16)
     g_load_views.contact_player=g_load_coop.anchor;
   if (!g_load_chunk_ok)
@@ -540,7 +562,9 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
 static bool s_ws_recover_armor;
 static int MmxWsMargin(void);
 void MmxOnStateLoaded(uint32_t version) {
+  MmxReplayStateLoaded();
   MmxRendererReset();
+  MmxKncBugfixSetState(g_load_knc_bugfix);
   s_ws_recover_armor = g_mmx_custom_renderer && MmxWidePolicy_PrematureRideArmor(g_ram);
   if (g_mmx_custom_renderer && !g_load_native_streakers) {
     for (uint16 object = 0xe68; object <= 0x1228; object += 64) {
@@ -559,6 +583,7 @@ void MmxOnStateLoaded(uint32_t version) {
   g_first_frame_done = complete ? g_load_frame_flags[1] != 0 : true;
   MmxWideStateApply(complete);
   MmxZeroSetState(g_load_zero);
+  if (complete) MmxZeroExtLoadState(g_load_zero_extension);
   MmxWeaponsSetState(g_load_weapons);
   MmxWeaponsSetCombatState(g_load_weapon_combat);
   if (complete && g_load_chunk.version >= 14) MmxCoopSetState(&g_load_coop);
@@ -998,6 +1023,7 @@ void RunOneFrameOfGame(void) {
     }
   }
   cpu_trace_px_breadcrumb(&g_cpu, 0x2002, "before_Internal");
+  MmxKncBugfixTick(g_ram,RtlGetPadState(0),RtlGetPadState(1));
   if (MmxCoopEnabled()) MmxCoopPoll(RtlGetPadState(0), RtlGetPadState(1));
   else if (MmxZeroSwapTick(g_ram)) return;
   if (MmxCoopEnabled() ? MmxCoopFrameTick(g_ram) : MmxWeaponsFrameTick(g_ram)) {

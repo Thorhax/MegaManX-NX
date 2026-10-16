@@ -99,6 +99,8 @@ The code changes are:
 
 You need Docker with a devkitPro image that has `switch-sdl2` and `switch-mesa`
 (`devkitpro/devkita64`). Regenerating the C code also needs Rust and Python.
+`switch/build.sh` converts Saber Zero's art and sounds on the build machine
+first, so it also needs a C compiler and Python 3 with Pillow there.
 
 ```bash
 cp "/path/to/Mega Man X (USA) (Rev 1).sfc" mmx.sfc

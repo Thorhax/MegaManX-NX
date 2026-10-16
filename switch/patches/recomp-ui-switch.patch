@@ -1,5 +1,5 @@
 diff --git a/recomp_ui.cmake b/recomp_ui.cmake
-index c41da2d..755a173 100644
+index 079d241..0e3394b 100644
 --- a/recomp_ui.cmake
 +++ b/recomp_ui.cmake
 @@ -227,7 +227,9 @@ function(recomp_target_launcher_ui TGT)
@@ -13,7 +13,7 @@ index c41da2d..755a173 100644
          target_compile_definitions(${TGT} PRIVATE
              LNG_GLES2=1
              IMGUI_IMPL_OPENGL_ES2=1)
-@@ -244,7 +246,10 @@ function(recomp_target_launcher_ui TGT)
+@@ -247,7 +249,10 @@ function(recomp_target_launcher_ui TGT)
      # than having to remember to link OpenGL itself — mirrors the standalone
      # CMakeLists.txt. SDL is still the host's to provide (its provenance varies:
      # vendored, find_package, etc.); GL is a uniform system lib, so it lives here.
@@ -25,7 +25,7 @@ index c41da2d..755a173 100644
          find_library(RUI_GLES2_LIBRARY GLESv2 REQUIRED)
          find_library(RUI_EGL_LIBRARY EGL REQUIRED)
          find_library(RUI_LOG_LIBRARY log REQUIRED)
-@@ -268,7 +273,7 @@ function(recomp_target_launcher_ui TGT)
+@@ -271,7 +276,7 @@ function(recomp_target_launcher_ui TGT)
      # remember, no missing-dependency failure.
      if(WIN32)
          target_link_libraries(${TGT} PRIVATE d2d1 dwrite windowscodecs ole32)
@@ -35,10 +35,10 @@ index c41da2d..755a173 100644
          if(TARGET Freetype::Freetype)
              target_compile_definitions(${TGT} PRIVATE RECOMP_UI_HAVE_FREETYPE=1)
 diff --git a/src/common/backends/imgui/launcher_imgui.cpp b/src/common/backends/imgui/launcher_imgui.cpp
-index 4a5a26c..47c717d 100644
+index cbae6e9..428b5f4 100644
 --- a/src/common/backends/imgui/launcher_imgui.cpp
 +++ b/src/common/backends/imgui/launcher_imgui.cpp
-@@ -236,6 +236,33 @@ void scale_mouse_event(SDL_Event& e, float coords) {
+@@ -238,6 +238,33 @@ void scale_mouse_event(SDL_Event& e, float coords) {
      }
  }
  
@@ -72,7 +72,7 @@ index 4a5a26c..47c717d 100644
  /* True where the SDL backend re-asserts the cursor from the global mouse
   * state every frame (the same driver whitelist it uses). Elsewhere — Wayland —
   * there is no global cursor and motion events are the only source, so asking
-@@ -1532,7 +1559,7 @@ void apply_scale(const LauncherTheme& th, float scale, const char* font_path,
+@@ -1538,7 +1565,7 @@ void apply_scale(const LauncherTheme& th, float scale, const char* font_path,
      style.WindowPadding  = ImVec2(th.spacing_lg, th.spacing_lg);
      style.FramePadding   = ImVec2(th.spacing_md, th.spacing_sm);
      style.ItemSpacing    = ImVec2(th.spacing_md, th.spacing_sm);
@@ -81,14 +81,20 @@ index 4a5a26c..47c717d 100644
      style.TouchExtraPadding = ImVec2(5.0f, 5.0f);
      style.ScrollbarSize = 24.0f;
  #endif
-@@ -3790,11 +3817,15 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+@@ -3914,6 +3941,7 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
          // no measuring pass over the labels is needed and the card reads as a
          // grid flush on both sides.
          const float cb = ImGui::GetFrameHeight();   // a checkbox is square
 +#if !defined(__SWITCH__)   /* one fixed full-screen window */
          row_window_scale(m, th);
+         if (launcher_model_render_pipeline_offered(m)) {
+         row_label_right("Render thread", th, px(SETTINGS_CTRL_W));
+@@ -3942,10 +3970,13 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+         ImGui::EndDisabled();
+     }
+ 
 +#endif
-         // Universal fullscreen row (every console; Off/Borderless/Exclusive,
+     // Universal fullscreen row (every console; Off/Borderless/Exclusive,
          // the legacy launcher's vocabulary). Sits right under Window scale,
          // matching the old Display panel order.
 +#if !defined(__SWITCH__)   /* one fixed full-screen window */
@@ -97,7 +103,7 @@ index 4a5a26c..47c717d 100644
          if (m->num_display_layouts > 0) {
              row_label_right("Screen layout", th, px(180));
              ImGui::PushID("screen_layout");
-@@ -3897,7 +3928,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+@@ -4048,7 +4079,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
          if (ImGui::Button(ui_text(launcher_model_window_size_label(m)), ImVec2(px(SETTINGS_CTRL_W), px(30))))
              launcher_model_cycle_window_size(m);
      } else {
@@ -107,7 +113,7 @@ index 4a5a26c..47c717d 100644
      }
  
      // NES module rows can appear on this branch too (has_renderer puts NES
-@@ -4001,7 +4034,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+@@ -4177,7 +4210,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
      // Universal fullscreen row (every console — no longer gated on the
      // vestigial has_fullscreen_toggle). A tri-state dropdown, so Exclusive is
      // both reachable and visible without pressing through the other two.
@@ -117,7 +123,7 @@ index 4a5a26c..47c717d 100644
      if (m->num_display_layouts > 0) {
          /* Wider than the shared column: these labels come from the HOST, not
           * from a vocabulary this file owns, and a button (unlike a combo) does
-@@ -13828,6 +13863,9 @@ std::string asset(const char* rel) {
+@@ -14536,6 +14571,9 @@ std::string asset(const char* rel) {
  
  #if defined(__ANDROID__)
      const char* base = SDL_AndroidGetInternalStoragePath();
@@ -127,7 +133,7 @@ index 4a5a26c..47c717d 100644
  #else
      const char* base = SDL_GetBasePath();
  #endif
-@@ -13872,7 +13910,7 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+@@ -14585,7 +14623,7 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
       * KEY would have to be physically held, and the window would not have
       * focus to receive it. */
      s_pad_nav_armed = false;
@@ -136,7 +142,7 @@ index 4a5a26c..47c717d 100644
      io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
  #endif
      io.IniFilename = nullptr;
-@@ -14064,6 +14102,14 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+@@ -14804,6 +14842,14 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
              default:
                  break;
              }
@@ -152,10 +158,10 @@ index 4a5a26c..47c717d 100644
          } while (SDL_PollEvent(&ev));
  
 diff --git a/src/common/launcher_debug.c b/src/common/launcher_debug.c
-index f56e631..806280d 100644
+index 458c2cb..cf3fabb 100644
 --- a/src/common/launcher_debug.c
 +++ b/src/common/launcher_debug.c
-@@ -178,6 +178,7 @@ void launcher_debug_step(LauncherPlatform* p, LauncherModel* m) {
+@@ -184,6 +184,7 @@ static bool launcher_debug_step_impl(LauncherPlatform* p, LauncherModel* m) {
          else if (strcmp(v, "controller") == 0) launcher_model_set_view(m, LNG_VIEW_CONTROLLER);
          else if (strcmp(v, "assist_tools") == 0) launcher_model_set_view(m, LNG_VIEW_ASSIST_TOOLS);
          else if (strcmp(v, "credits") == 0) launcher_model_set_view(m, LNG_VIEW_CREDITS);
@@ -179,6 +185,81 @@ index 0272a7e..94f9a33 100644
      return linux_have_cmd("zenity") || linux_have_cmd("kdialog");
  #else
      return true;
+diff --git a/src/common/launcher_model.c b/src/common/launcher_model.c
+index acb6db0..4b81fca 100644
+--- a/src/common/launcher_model.c
++++ b/src/common/launcher_model.c
+@@ -3115,6 +3115,20 @@ static DWORD WINAPI prep_thread_main(LPVOID arg);
+ static void* prep_thread_main(void* arg);
+ #endif
+ 
++#if defined(__SWITCH__)
++static pthread_t g_prep_thread;
++static int g_prep_thread_live;
++#endif
++
++void launcher_model_join_prep(void) {
++#if defined(__SWITCH__)
++    if (g_prep_thread_live) {
++        pthread_join(g_prep_thread, NULL);
++        g_prep_thread_live = 0;
++    }
++#endif
++}
++
+ static int prep_spawn_thread(LauncherModel* m) {
+ #if defined(_WIN32)
+     HANDLE th = CreateThread(NULL, 0, prep_thread_main, &g_prep_job, 0, NULL);
+@@ -3127,13 +3141,23 @@ static int prep_spawn_thread(LauncherModel* m) {
+     CloseHandle(th);
+ #else
+     pthread_t th;
++#if defined(__SWITCH__)
++    launcher_model_join_prep();
++#endif
+     if (pthread_create(&th, NULL, prep_thread_main, &g_prep_job) != 0) {
+         m->setup_preparing = false;
+         safe_copy(m->setup_error, sizeof(m->setup_error), "Failed to start prepare thread.");
+         m->setup_status[0] = '\0';
+         return 0;
+     }
++#if defined(__SWITCH__)
++    /* Joined, never detached: the NRO must not return to the homebrew
++     * loader with a thread still alive (launcher_model_join_prep). */
++    g_prep_thread = th;
++    g_prep_thread_live = 1;
++#else
+     pthread_detach(th);
++#endif
+ #endif
+     return 1;
+ }
+diff --git a/src/common/launcher_model.h b/src/common/launcher_model.h
+index 1e7fc30..66ee102 100644
+--- a/src/common/launcher_model.h
++++ b/src/common/launcher_model.h
+@@ -1193,6 +1193,9 @@ void launcher_model_start_prepare_disc(LauncherModel* m, const char* source_path
+ /* Run the host's bios_prepare_with_progress for the staged BIOS (progress
+  * modal only; wizard resumes after). No-op without the callback. */
+ void launcher_model_begin_bios_prepare(LauncherModel* m);
++/* Waits for a running prepare/rebuild job's thread (Switch only; elsewhere
++ * the thread is detached and this does nothing). */
++void launcher_model_join_prep(void);
+ // Kick rebuild_with_progress alone (same busy UI as prepare).
+ void launcher_model_start_rebuild(LauncherModel* m);
+ // Confirm + kick pgo_optimize_with_progress (instrument → train → use rebuild).
+diff --git a/src/common/launcher_ng_capi.c b/src/common/launcher_ng_capi.c
+index f696b0c..682375e 100644
+--- a/src/common/launcher_ng_capi.c
++++ b/src/common/launcher_ng_capi.c
+@@ -239,6 +239,7 @@ int recomp_launcher_run_window(const char* window_title,
+      * dismissed is still a setting changed. Commit also persists verified
+      * dashboard cartridge picks; those hosts never enter the setup wizard's
+      * sidecar-writing path. */
++    launcher_model_join_prep();
+     launcher_model_commit(&model, io);   // edited settings back to the caller
+     launcher_settings_save(&model.s, &before, game);
+     if (act != LNG_ACTION_LAUNCH && act != LNG_ACTION_RELAUNCH && io) {
 diff --git a/src/common/launcher_platform_sdl2.c b/src/common/launcher_platform_sdl2.c
 index 2595ce3..97f3ae2 100644
 --- a/src/common/launcher_platform_sdl2.c

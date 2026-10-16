@@ -4,6 +4,45 @@ static unsigned coop_vile_slot(unsigned kind) {
     if(g_ram[d] && g_ram[d+10]==kind) return d;
   return 0;
 }
+/* Owner checkpoint before the Highway ship finishes deploying cars. Keep the
+ * actual actors, sound processor and co-op contexts from the save: fabricating
+ * Vile alone misses the ship's earlier music-bank handoff. */
+static void coop_highway_vile_checks(const char *fixture) {
+  check(MmxCoopEnable(0),"Highway Vile co-op enables");
+  check(RtlLoadSnapshot(fixture),"private Highway traffic fixture loads");
+  g_mmx_custom_renderer=true;g_mmx_custom_aspect=MMX_ASPECT_16_9;
+  g_mmx_expanded_sprites=true;int w,h;MmxPrepareFrame(1280,720,&w,&h);
+  check(g_ram[0x1f7a]==0 && coop_vile_slot(0x1a),"fixture contains the Highway ship");
+  MmxCoopState s=MmxCoopGetState();
+  check(s.players[0].status==MMX_COOP_ALIVE && s.players[1].status==MMX_COOP_ALIVE,
+      "both players are present before the encounter");
+  bool vile=false,rescue=false,transport=false,cleared=false,returned=false;
+  for(unsigned tick=0;tick<6500;++tick) {
+    vile|=coop_vile_slot(0x32)!=0;
+    rescue|=coop_vile_slot(0x33)!=0;
+    s=MmxCoopGetState();transport|=s.scene_phase==2;
+    if(g_ram[0x1f7a]!=0) cleared=true;
+    if(cleared && g_ram[0xd1]==2 && g_ram[0xd2]==4 && g_ram[0xd3]==4 &&
+        !s.scene_owner && !g_ram[0xc16] &&
+        s.players[0].status==MMX_COOP_ALIVE && s.players[1].status==MMX_COOP_ALIVE &&
+        s.players[0].body[2]<4 && s.players[1].body[2]<4 &&
+        !s.players[0].zero.swap_phase && !s.players[1].zero.swap_phase) {
+      returned=true;break;
+    }
+    /* Both fire through the cars and fight. Periodic face-button edges also
+     * advance the native conversation and stage selection after the rescue. */
+    unsigned pad=tick%180<160 ? SNES_PAD_Y : 0;
+    if(g_ram[0x1f3b] && tick%30==0) pad|=SNES_PAD_A|SNES_PAD_B;
+    coop_frames(1,pad,pad);
+  }
+  check(vile && rescue && transport && cleared && returned,
+      "Highway Vile arrives, captures, is interrupted by Zero, and both players enter the next stage");
+  unsigned x0=coop_x(&s.players[0]),x1=coop_x(&s.players[1]);
+  coop_frames(12,SNES_PAD_RIGHT,SNES_PAD_RIGHT);s=MmxCoopGetState();
+  check(coop_x(&s.players[0])>x0 && coop_x(&s.players[1])>x1,
+      "both players regain control after the Highway encounter");
+  MmxCoopDisable();puts("MMX CO-OP HIGHWAY VILE CHECKS PASSED");
+}
 static void coop_vile_farewell_checks(const char *fixture) {
   for(unsigned xs=0;xs<2;++xs) {
     check(MmxCoopEnable(0),"farewell roster enables");

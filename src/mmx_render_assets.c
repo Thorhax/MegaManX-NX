@@ -637,11 +637,15 @@ uint16_t MmxRenderAssetsFadeColor(uint16_t color, unsigned amount) {
   return (uint16_t)result;
 }
 unsigned MmxRenderAssetsDeathPaletteFade(const uint8_t ram[0x20000], const uint16_t colors[256]) {
-  if (!ram || !colors || ram[0xd3] != 6 || !prepare_background(ram)) return 0;
+  /* Stage play (4), death (6) and clear (8). */
+  if (!ram || !colors || (ram[0xd3] != 4 && ram[0xd3] != 6 && ram[0xd3] != 8) ||
+      !prepare_background(ram)) return 0;
   const MmxBackgroundPalette *base = background_palette(ram[0x1f0a] & 15);
-  /* Death adds the same saturating RGB amount to the live palettes. Infer
-   * only an exact transform of every owned opaque color, from captured CGRAM
-   * (RAM can be a DMA ahead), then apply it to private margin resources too. */
+  /* Death adds the same saturating RGB amount to the live palettes, and so do
+   * a defeated Maverick's white flashes. Infer only an exact transform of
+   * every owned opaque color, from captured CGRAM (RAM can be a DMA ahead),
+   * then apply it to private margin resources too: the anchored HUD and the
+   * margin's stage tiles would otherwise stay unlit beside a white screen. */
   for (unsigned fade = 0; fade <= 31; ++fade) {
     unsigned checked = 0; bool match = true;
     for (unsigned i = 0; i < 128 && match; ++i) if ((i & 15) && base->valid[i]) {

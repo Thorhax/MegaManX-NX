@@ -12,6 +12,8 @@
 #include "mmx_display.h"
 #include "mmx_renderer.h"
 #include "mmx_zero.h"
+#include "mmx_knc_bugfix.h"
+#include "mmx_hitbox_overlay.h"
 #include "mmx_weapon_combat.h"
 #include "mmx_weapons.h"
 #include "snes/cart.h"
@@ -21,6 +23,8 @@
 #include "mmx_startup.h"
 #include "mmx_coop_trace.h"
 #include "mmx_coop_view.h"
+#include "mmx_replay.h"
+#include "desktop/sdl_compat.h"
 #include "netplay/snes_netplay.h"
 #include "host_paths.h"
 #include "snes_savestate_menu.h"
@@ -49,7 +53,7 @@ static void MmxPrepareFrame(int dw, int dh, int *w, int *h) {
   /* A room has one logical field. Window size and each peer's offline pixel
    * preference cannot widen it. The offline setting is never overwritten. */
   SnesDisplayAspect aspect = SnesDisplayAspect_Clamp(MmxNetplayActive() ? 0 : g_config.display_aspect);
-  g_mmx_custom_renderer = !MMX_VARIANT_JP && (g_config.widescreen || MmxZeroEnabled() || MmxWeaponsEnabled());
+  g_mmx_custom_renderer = !MMX_VARIANT_JP && (g_config.widescreen || MmxZeroEnabled() || MmxWeaponsEnabled() || MmxKncBugfixActive(0) || MmxKncBugfixActive(1));
   g_mmx_custom_view = MmxRendererViewport(g_mmx_custom_aspect, dw, dh,
       aspect);
   if (!g_config.widescreen) {
@@ -58,6 +62,7 @@ static void MmxPrepareFrame(int dw, int dh, int *w, int *h) {
         aspect, &pw, &ph);
     g_mmx_custom_view = (MmxRenderView){256, 0, (double)pw / ph};
   }
+  MmxReplayViewport(&g_mmx_custom_view.width,&g_mmx_custom_view.extra);
   *w = g_mmx_custom_renderer ? g_mmx_custom_view.width : 256;
   *h = 224;
 }
@@ -108,12 +113,14 @@ static void MmxBeforeFrame(void) {
 #if defined(__SWITCH__)
   MmxRenderModeHotkey();
 #endif
+  if(!MmxReplayPlaying()) {
 #if SNESRECOMP_NET
   MmxCoopViewsSetOnline(snes_netplay_active() && MmxCoopEnabled() && MmxCoopViewsIndependent());
   MmxRendererSetPeerView(MmxCoopViewsOnline()?snes_netplay_local_slot():-1);
 #else
   MmxCoopViewsSetOnline(false);MmxRendererSetPeerView(-1);
 #endif
+  }
   /* MMX's draw hook runs the original per-line HDMA sequence itself. */
   snes_set_hdma_beam_enabled(g_snes, false);
   if (g_snes->cart) {
@@ -125,12 +132,13 @@ static void MmxBeforeFrame(void) {
   if (g_mmx_custom_renderer) MmxRendererLatchSprites();
 }
 static void MmxResetRenderer(void) {
+  MmxKncBugfixReset();
   MmxRendererReset();
   s_render_valid = false;
 }
 static void MmxBeginFrame(unsigned number) {
   (void)number;
-  if (!g_mmx_custom_renderer) return;
+  if (!g_mmx_custom_renderer) { MmxHitboxOverlayBeginStockFrame(); return; }
   uint32_t flags = g_config.new_renderer ? kPpuRenderFlags_NewRenderer : 0;
   if (g_config.no_sprite_limits) flags |= kPpuRenderFlags_NoSpriteLimits;
   PpuBeginDrawing(g_ppu, g_ppu->renderBuffer, 256 * 4, flags);
@@ -157,8 +165,14 @@ static void MmxEndFrame(const uint8_t *field, unsigned number) {
 static int MmxDrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
                         int w, int h, double alpha) {
   (void)alpha;
-  if (!g_mmx_custom_renderer) return 0;
   static uint32_t output[MMX_RENDER_MAX_WIDTH * 224];
+  if (!g_mmx_custom_renderer) {
+    /* The overlay never enables the compositor: that also widens culling
+     * and spawn policy, which would make a drawing aid change the game. */
+    if (w != 256 || h != 224 || !MmxHitboxOverlayDrawStock(output, field)) return 0;
+    RtlWidescreenPresent(dst, pitch, (const uint8_t *)output, w, h);
+    return 1;
+  }
   if (!s_render_valid || !MmxRendererDraw(output, g_mmx_custom_view, g_mmx_custom_hud)) {
     memset(output, 0, (size_t)w * h * sizeof(*output));
     for (int y = 0; y < h; ++y)
@@ -219,6 +233,9 @@ static void MmxAfterConfig(void) {
   }
 }
 static void MmxAfterFrame(const SnesDesktopHostFrameStats *stats) {
+  if (MmxReplayPlaying() && (MmxReplayFinished() || MmxReplayFailed())) {
+    SDL_Event quit = {0}; quit.type = SDL_QUIT; SDL_PushEvent(&quit);
+  }
   /* Netplay resimulates frames and must never pause for disk writes. */
   MmxCoopTraceAfterFrame(!MmxNetplayActive());
   if (s_benchmark_frames && stats->frame == (unsigned)s_benchmark_frames) {
@@ -268,6 +285,14 @@ static void MmxConfigureCoopTrace(int *argc, char **argv) {
 
 int MMX_DESKTOP_ENTRY(int argc, char **argv) {
   MmxStartupLogging();
+  for(int arg=1;arg+1<argc;++arg)
+    if(!strcmp(argv[arg],"--config")) MmxReplaySetConfigPath(argv[arg+1]);
+  for (int arg = 1; arg < argc; ++arg) {
+    if (strcmp(argv[arg], "--replay-diagnostic")) continue;
+    if (arg + 1 == argc || !MmxReplayPlayback(argv[arg + 1])) return 2;
+    for (int i = arg; i + 2 <= argc; ++i) argv[i] = argv[i + 2];
+    argc -= 2; break;
+  }
   MmxConfigureCoopTrace(&argc, argv);
   ConfigUseStateMenuDefaults();
   for (int arg = 1; arg + 1 < argc; ++arg) {
@@ -328,5 +353,13 @@ int MMX_DESKTOP_ENTRY(int argc, char **argv) {
     .prepare_netplay = MmxNetplayPrepare,
     .netplay_ready = MmxNetplayReady,
   };
-  return snesrecomp_desktop_main(&game, argc, argv);
+  int result = snesrecomp_desktop_main(&game, argc, argv);
+  /* On Switch the homebrew loader starts the next NRO (this one again, for
+   * the in-game launcher, or the Homebrew Menu) inside this same process, so
+   * no thread may outlive main(): libnx maps each thread's stack out of the
+   * heap, and one left running keeps those pages unmapped under the next
+   * NRO's heap. */
+  MmxRendererStopWorkers();
+  MmxReplayClose();
+  return MmxReplayPlaying() && (MmxReplayFailed() || !MmxReplayFinished()) ? 2 : result;
 }
