@@ -7,6 +7,8 @@
 #include "mmx_weapons.h"
 #include "mmx_weapon_combat.h"
 #include "mmx_coop_view.h"
+#include "mmx_boss_rush.h"
+#include "mmx_boss_rush_score.h"
 #include <math.h>
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -24,6 +26,8 @@ typedef struct Raster {
    * frame.lines[vram_line]. -1 means this raster owns `vram` outright. */
   int16_t vram_line;
 } Raster;
+static MmxBossRushState frame_rush;
+static MmxBossRushVisualState frame_rush_visual;
 typedef struct Piece {
   int16_t x, y; uint16_t attr; uint8_t size, animation;
   /* Palette occupies bits 1..3; the five spare bits retain charged-shot
@@ -64,6 +68,7 @@ static MmxZeroState frame_zero;
 static MmxWeaponsState frame_weapons;
 static MmxWeaponCombatState frame_weapon_combat;
 static MmxCoopState frame_coop;
+static MmxCoopViewBoundsState frame_bounds;
 static bool frame_held;
 static int peer_seat=-1,view_dx,view_dy;
 void MmxRendererSetPeerView(int seat) { peer_seat=seat>=0 && seat<2?seat:-1; }
@@ -150,7 +155,7 @@ static bool zero_title_menu(void) {
   unsigned y = word(frame.ram,0xbb0);
   return MmxZeroEnabled() && !frame_zero.active_x && frame.ram[0xd1] == 0 && frame.ram[0xba9] == 2 &&
       frame.ram[0xbbe] == 0 && word(frame.ram,0xbad) == 32 &&
-      y >= 166 && y <= 198;
+      y >= 166 && y <= 214;
 }
 /* X1's buster charge cycles palette 1 in CGRAM itself while its sparkle
  * objects (class 1, $0C98..$0E17, $82:82ED) are live. The co-op weapon
@@ -172,6 +177,8 @@ static const uint8_t *rom_at(unsigned address, size_t length) {
 }
 void MmxRendererSetRom(const uint8_t *bytes, size_t length) {
   rom = bytes; rom_size = length; MmxRenderAssetsSetRom(bytes, length);
+  MmxCoopViewsSetRom(bytes,length);
+  MmxRenderAssetsPreloadRush();
 }
 void MmxRendererSetPlayerOverlayProvider(
     MmxRendererPlayerOverlayProvider provider) {
@@ -343,7 +350,10 @@ void MmxRendererObserveObject(const uint8_t ram[0x20000], uint16_t object) {
     building_stage = ram[0x1f7a];
   }
   current_object = object;
-  if (observed_lists || (!g_mmx_expanded_sprites && !MmxCoopViewsOnline())) return;
+  /* Two bosses and their attacks exceed the retail OAM submission budget.
+   * Preserve the native queue and full arrangements in Rush too. */
+  if (observed_lists || (!g_mmx_expanded_sprites && !MmxCoopViewsOnline() &&
+      MmxBossRushGetState().mode!=MMX_RUSH_PLAYING)) return;
   observed_lists = true;
   expand_queues(ram);
 }
@@ -372,13 +382,14 @@ void MmxRendererRecordPiece(const uint8_t ram[0x20000], uint16_t d) {
 }
 void MmxRendererLatchSprites(void) {
   if ((frame_held || MmxZeroSwapping() || MmxWeaponsTimeActive()) && !building_count) return;
-  /* Menu fades suspend OAM construction but the PPU keeps its previous
-   * sprites. Retain only Zero's attribution; drawing still requires an exact
-   * match in that raster's live OAM, so a real hidden blink stays hidden. */
-  if (MmxZeroEnabled() && !building_count && latched_stage == building_stage) {
+  /* Menu fades suspend OAM construction while the PPU repeats old sprites.
+   * Keep Zero and private boss attribution until native OAM retires them. */
+  bool rush=MmxBossRushGetState().mode==MMX_RUSH_PLAYING;
+  if ((MmxZeroEnabled() || rush) && !building_count && latched_stage == building_stage) {
     unsigned count = 0;
     for (unsigned i = 0; i < latched_count; ++i)
-      if (zero_actor(latched[i].object,latched[i].animation)) latched[count++] = latched[i];
+      if ((MmxZeroEnabled() && zero_actor(latched[i].object,latched[i].animation)) ||
+          (rush && MmxBossRushOwner(latched[i].object)>=0)) latched[count++] = latched[i];
     latched_count = count;
   } else {
     latched_count = building_count;
@@ -424,6 +435,8 @@ void MmxRendererBeginFrame(const uint8_t ram[0x20000]) {
   unsigned world_sprite_count = 0;
   unsigned debug_rect_count = 0;
   reset_pilot_overlay_alignment();
+  frame_rush=MmxBossRushGetState();
+  frame_rush_visual=MmxBossRushVisualGetState();
   memset(&frame_coop,0,sizeof(frame_coop));
   memset(&frame_partner_overlay, 0, sizeof(frame_partner_overlay));
   memset(&overlay, 0, sizeof(overlay));
@@ -459,6 +472,7 @@ void MmxRendererBeginFrame(const uint8_t ram[0x20000]) {
   frame.valid = false; frame.captured = 0;
   memcpy(frame.ram, ram, sizeof(frame.ram));
   frame_zero = MmxZeroGetState();
+  frame_bounds=MmxCoopViewsGetBoundsState();
   frame_weapons = MmxWeaponsGetState();
   frame_weapon_combat = MmxWeaponsGetCombatState();
   if ((frame_held || MmxZeroSwapping() || MmxWeaponsTimeActive()) && !latched_count) {
@@ -481,7 +495,12 @@ void MmxRendererBeginFrame(const uint8_t ram[0x20000]) {
       unsigned d = actors[j]; bool found = false;
       if (d >= 0x1928 && !zero_weapons_menu()) continue;
       for (unsigned i = 0; i < frame.piece_count; ++i) found |= frame.pieces[i].object == d;
-      if (found || !ram[d + 14]) continue;
+      /* $81:8AAA disables armor at death but leaves +$0E set. Unlike the
+       * body, D56F submits these parts only while their active byte is set.
+       * Reconstructing dormant parts makes expanded lists retain white
+       * armor after the native body burst. Recorded OAM keeps its epoch. */
+      bool inactive_armor=d>=0xc38 && d<=0xc78 && !ram[d];
+      if (found || !ram[d + 14] || inactive_armor) continue;
       const uint8_t *a = sprite_arrangement(ram[d + 22],ram[d + 23] & 127);
       if (!a) continue;
       int x = (int16_t)(word(ram,d + 5) - word(ram,0x1e4d));
@@ -494,7 +513,12 @@ void MmxRendererBeginFrame(const uint8_t ram[0x20000]) {
   }
   frame.expanded_count = latched_stage == ram[0x1f7a] ? expanded_latched_count : 0;
   memcpy(frame.expanded, expanded_latched, frame.expanded_count * sizeof(Piece));
-  frame.expand = g_mmx_expanded_sprites || MmxCoopViewsOnline();
+  frame.expand = g_mmx_expanded_sprites || MmxCoopViewsOnline() ||
+      (frame_rush.mode==MMX_RUSH_PLAYING && MmxWidePolicy_IsStageScene(frame.ram) &&
+       !zero_weapons_menu() &&
+       !MmxWeaponsMenuVisible(frame.ram));
+  if(frame_rush.mode==MMX_RUSH_PLAYING && frame.expand && !frame.expanded_count && frame.piece_count)
+    frame.expand=false; /* A fade retained native OAM, not a new expanded queue. */
   if (MmxZeroEnabled() && frame.expand) for (unsigned i = 0; i < frame.piece_count; ++i) {
     Piece p = frame.pieces[i]; if (!zero_actor(p.object,p.animation)) continue;
     bool found = false;
@@ -513,6 +537,16 @@ static bool pilot_overlay_oam_match(const Piece *piece) {
       if (ox == piece->x && (pos >> 8) == ((unsigned)piece->y & 255) &&
           r->oam[slot * 2 + 1] == piece->attr) return true;
     }
+  }
+  return false;
+}
+static bool rush_pause_art_needed(void) {
+  if(frame_rush.mode!=MMX_RUSH_PLAYING) return false;
+  for(unsigned i=0;i<frame.piece_count;++i) {
+    const Piece *p=frame.pieces+i;
+    if(p->object<0xe68 || p->object>=0x1d08 ||
+        (p->object>=0x1928 && p->object<=0x1988)) continue;
+    if(frame_rush.owner[(p->object-0xe68)/32] && pilot_overlay_oam_match(p)) return true;
   }
   return false;
 }
@@ -690,13 +724,15 @@ bool MmxRendererCapturedLineIsCustom(const Ppu *ppu, unsigned line) {
   if (!ppu || line < 1 || line > 224 || frame.captured != line) return false;
   if (line == 1) {
     const bool zero_menu = zero_weapons_menu();
-    const bool menu = zero_menu || MmxWeaponsMenuVisible(frame.ram);
+    const bool menu = zero_menu || MmxWeaponsMenuVisible(frame.ram) ||
+        (!MmxWidePolicy_IsStageScene(frame.ram) && rush_pause_art_needed());
     const bool zero_title = zero_title_menu();
     const bool stage = MmxWidePolicy_IsStageScene(frame.ram) && !menu;
-    s_scene_custom = stage || menu || zero_title;
+    s_scene_custom = stage || menu || zero_title || frame_rush.menu;
   }
   /* MmxRendererDraw copies frame.stock for (bgmode & 7) != 1 or a scene
-   * that is none of stage/menu/title; every other line it composes. */
+   * that is none of stage/menu/title/Boss Rush menu; every other line it
+   * composes. */
   return s_scene_custom && (ppu->bgmode & 7) == 1;
 }
 bool MmxRendererEndFrame(const uint32_t stock[256 * 224]) {
@@ -740,14 +776,17 @@ bool MmxRendererSaveCapture(const char *path) {
   if (!frame.valid || !path) return false;
   FILE *f = fopen(path, "wb");
   if (!f) return false;
-  uint32_t header[] = {0x4d4d5843, frame_coop.initialized ? 17 : 16,
+  uint32_t header[] = {0x4d4d5843, frame_coop.initialized ? 23 : 22,
       sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat) +
-      (frame_coop.initialized ? sizeof(frame_coop) : 0)};
+      (frame_coop.initialized ? sizeof(frame_coop) : 0) + sizeof(frame_rush) + sizeof(frame_rush_visual)+sizeof(frame_bounds)};
   bool ok = fwrite(header, sizeof(header), 1, f) == 1 && fwrite(&frame, sizeof(frame), 1, f) == 1 &&
       fwrite(&frame_zero, sizeof(frame_zero), 1, f) == 1 &&
       fwrite(&frame_weapons, sizeof(frame_weapons), 1, f) == 1 &&
       fwrite(&frame_weapon_combat, sizeof(frame_weapon_combat), 1, f) == 1;
   if (ok && frame_coop.initialized) ok = fwrite(&frame_coop,sizeof(frame_coop),1,f) == 1;
+  if(ok) ok=fwrite(&frame_rush,sizeof(frame_rush),1,f)==1;
+  if(ok) ok=fwrite(&frame_rush_visual,sizeof(frame_rush_visual),1,f)==1;
+  if(ok) ok=fwrite(&frame_bounds,sizeof(frame_bounds),1,f)==1;
   return fclose(f) == 0 && ok;
 }
 bool MmxRendererLoadCapture(const char *path) {
@@ -761,6 +800,9 @@ bool MmxRendererLoadCapture(const char *path) {
   memset(&frame_weapons, 0, sizeof(frame_weapons));
   memset(&frame_weapon_combat, 0, sizeof(frame_weapon_combat));
   memset(&frame_coop,0,sizeof(frame_coop));
+  memset(&frame_bounds,0,sizeof(frame_bounds));
+  memset(&frame_rush,0,sizeof(frame_rush));
+  memset(&frame_rush_visual,0,sizeof(frame_rush_visual));
   bool ok = fread(h, sizeof(h), 1, f) == 1 && h[0] == 0x4d4d5843 &&
       ((h[1] == 2 && h[2] == sizeof(frame)) || (h[1] == 3 && h[2] == sizeof(frame) + MMX_ZERO_LEGACY_STATE_SIZE) ||
        (h[1] == 4 && h[2] == sizeof(frame) + MMX_ZERO_ANIMATION_STATE_SIZE) ||
@@ -775,7 +817,8 @@ bool MmxRendererLoadCapture(const char *path) {
        (h[1] == 13 && h[2] == sizeof(frame) + MMX_ZERO_HEALTH_STATE_SIZE + sizeof(frame_weapons) + sizeof(frame_weapon_combat) + MMX_COOP_LEGACY_STATE_SIZE) ||
        (h[1] == 14 && h[2] == sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat)) ||
        ((h[1] == 15 || h[1] == 17) && h[2] == sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat) + sizeof(frame_coop)) ||
-       (h[1] == 16 && h[2] == sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat))) &&
+       (h[1] == 16 && h[2] == sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat)) ||
+       ((h[1]>=18 && h[1]<=23) && h[2]==sizeof(frame)+sizeof(frame_zero)+sizeof(frame_weapons)+sizeof(frame_weapon_combat)+sizeof(frame_rush)+((h[1]&1)?sizeof(frame_coop):0)+(h[1]>=20?sizeof(frame_rush_visual):0)+(h[1]>=22?sizeof(frame_bounds):0))) &&
       fread(&frame, sizeof(frame), 1, f) == 1 &&
       frame.captured == 224 && frame.piece_count <= MAX_PIECES && frame.expanded_count <= MAX_PIECES && frame.valid;
   size_t zero_size = h[1] == 3 ? MMX_ZERO_LEGACY_STATE_SIZE :
@@ -808,7 +851,7 @@ bool MmxRendererLoadCapture(const char *path) {
       }
     }
   }
-  if (ok && (h[1] == 13 || h[1] == 15 || h[1] == 17)) {
+  if (ok && (h[1] == 13 || h[1] == 15 || h[1] == 17 || h[1]==19 || h[1]==21 || h[1]==23)) {
     MmxCoopState coop;
     if (h[1] == 13) {
       uint8_t legacy[MMX_COOP_LEGACY_STATE_SIZE];
@@ -821,6 +864,9 @@ bool MmxRendererLoadCapture(const char *path) {
         MmxWeaponsValidState(&coop.players[i].weapons) && MmxWeaponsValidCombatState(&coop.players[i].combat);
     if (ok) MmxRendererCoopFrame(&coop);
   }
+  if(ok && h[1]>=18) ok=fread(&frame_rush,sizeof(frame_rush),1,f)==1 && MmxBossRushValidState(&frame_rush);
+  if(ok && h[1]>=20) ok=fread(&frame_rush_visual,sizeof(frame_rush_visual),1,f)==1 && MmxBossRushVisualValidState(&frame_rush_visual);
+  if(ok && h[1]>=22) ok=fread(&frame_bounds,sizeof(frame_bounds),1,f)==1 && MmxCoopViewsValidBoundsState(&frame_bounds);
   ok = ok && fgetc(f) == EOF;
   fclose(f); frame.valid = ok; return ok;
 }
@@ -999,6 +1045,17 @@ static inline uint16_t background_plain(PlainBg *b, unsigned layer, int x, int y
 }
 static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x, int y, bool stage, int *private_color) {
   static const unsigned low[] = {8, 7, 1}, high[] = {12, 11, 3};
+  if(stage && layer==0 && frame.ram[0x1f7a]==4 &&
+      (frame_rush.mode==MMX_RUSH_PLAYING || frame_rush.mode==MMX_RUSH_PREPARING)) {
+    int hook_x=frame_rush.camera_x+MMX_RUSH_ARENA_CENTER_X;
+    int sx=x+view_camera(frame.ram,0x1e4d)-hook_x+32;
+    int sy=y+view_camera(frame.ram,0x1e50)-(int)frame_rush.camera_y;
+    int pixel=MmxRenderAssetsRushCeilingPixel((unsigned)sx,(unsigned)sy);
+    if(pixel>=0) {
+      *private_color=pixel&0x7fff;
+      return (uint16_t)(((pixel&0x10000?high[0]:low[0])<<12)|1);
+    }
+  }
   bool margin = x < 0 || x >= 256;
   /* Launch's BG3 water plane is blended over the world on the subscreen.
    * Repeat that plane while retaining the vertical waterline/scroll. Other
@@ -1020,12 +1077,22 @@ static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x,
   if ((sc & 1) && (tx & 32)) a += 1024;
   if ((sc & 2) && (ty & 32)) a += (sc & 1) ? 2048 : 1024;
   uint16_t tile = raster_vram(r)[a & 0x7fff];
+  if(!stage && layer==2 && frame_rush.menu && (frame_rush.mode==MMX_RUSH_OFF ||
+      (frame_rush.mode==MMX_RUSH_LOADING && !frame_rush.stage_started))) {
+    /* Native title lettering is ASCII-indexed BG3 CHR. Keep its spacing,
+     * cyan/orange palettes, raster brightness and priority for all four rows. */
+    if((ty==20 || ty==22 || ty==24) && tx>=10 && tx<21)
+      tile=(uint16_t)((tile&~0x1c00)|(((ty-20)/2==frame_rush.selection)?0x400:0));
+    if(ty==26 && tx>=10 && tx<19)
+      tile=(uint16_t)(0x2000|(frame_rush.selection==3?0x400:0)|"BOSS RUSH"[tx-10]);
+  }
   if (layer == 0 && !stage) {
     int icon = weapon_menu_icon(x, y);
     if (icon >= 0) { *private_color = icon; return 0x8001; }
     tile = weapon_menu_tile(tx, ty, tile);
   }
-  if (stage && size == 8 && layer < 2 && !slime_surface && (x < 0 || x >= 256 || view_dx || view_dy)) {
+  if (stage && size == 8 && layer < 2 && !slime_surface &&
+      (x < 0 || x >= 256 || view_dx || view_dy)) {
     int wx, wy;
     if (layer == 0) {
       wx = MmxDisplay_ExpandStageScroll((uint16_t)word(frame.ram, 0x1e4d), p->hScroll[0]) + view_dx + x;
@@ -1158,6 +1225,18 @@ static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x,
       (armadillo_lower_shaft ? MmxRenderAssetsBackgroundPalettePhase(frame.ram, 1) :
        MmxRenderAssetsBackgroundPalette(frame.ram, asset_x)) : NULL;
   if (palette && palette->valid[index]) *private_color = palette->colors[index];
+  if(stage && layer==0 && frame.ram[0x1f7a]==4 && index>=0x50 && index<0x60 &&
+      (frame_rush.mode==MMX_RUSH_PLAYING || frame_rush.mode==MMX_RUSH_PREPARING)) {
+    int wy=y+view_camera(frame.ram,0x1e50)-(int)frame_rush.camera_y;
+    if(wy>=192 && wy<224) {
+      /* The belt animates by cycling BG palette $50. Match its physical
+       * carry: use live colors with Mammoth, the native first phase otherwise.
+       * Explicit live colors also keep expanded margins animating in sync. */
+      const MmxBackgroundPalette *belt=MmxRenderAssetsBackgroundPalettePhase(frame.ram,(frame.ram[0x1f96]&0x40)?9:4);
+      if(MmxBossRushConveyorRunning(&frame_rush)) *private_color=r->palette[index];
+      else if(belt && belt->valid[index]) *private_color=belt->colors[index];
+    }
+  }
   unsigned priority = tile & 0x2000 ? (layer == 2 && (p->bgmode & 8) ? 15 : high[layer]) : low[layer];
   return (uint16_t)((priority << 12) | (layer << 8) | index);
 }
@@ -1242,7 +1321,9 @@ static unsigned spark_lights(LightBeam beams[2], int extra) {
         (r[d + 0x2d] != 0x40 && r[d + 0x2d] != 0x80)) continue;
     bool right = r[d + 0x0b] == 1, fading = r[d + 3] != 0;
     int tip = (int16_t)(word(r, d + 0x22) - camera_x) + (right ? -24 : 24);
-    int top = fading ? (int16_t)word(r, d + 0x36) :
+    /* A fading beam keeps the native screen-space top cached at A6F7.
+     * Its world position still needs the peer camera's vertical offset. */
+    int top = fading ? (int16_t)word(r, d + 0x36) - view_dy :
         (int16_t)(word(r, d + 0x24) - camera_y) - 24;
     unsigned height = fading ? r[d + 0x3b] : 49;
     int inset = fading ? r[d + 0x1f] : 0;
@@ -1267,13 +1348,26 @@ static unsigned spark_lights(LightBeam beams[2], int extra) {
   return count;
 }
 static bool condition(unsigned mode, bool inside) { return mode == 3 || (mode == 1 && !inside) || (mode == 2 && inside); }
-static uint32_t colour(const Ppu *p, const uint16_t *palette, const uint8_t brightness[32], uint16_t main, uint16_t sub, bool inside, int object_color, const int bg_colors[3], bool dialogue_margin) {
+static uint32_t colour(const Ppu *p, const uint16_t *palette, const uint8_t brightness[32], uint16_t main, uint16_t sub, bool inside, int object_color, const int bg_colors[3], bool dialogue_margin, uint16_t camouflage_bg) {
   unsigned rgb = palette[main & 255], layer = (main >> 8) & 15;
   if (object_color >= 0 && (layer == 4 || layer == 6)) rgb = (unsigned)object_color;
   if (layer < 3 && bg_colors[layer] >= 0) rgb = (unsigned)bg_colors[layer];
+  bool camouflage=object_color>=0 && (object_color&0x8000) && (layer==4 || layer==6);
+  if(camouflage) {
+    /* $88:85DE selects full additive OBJ/subscreen math. Black fades into
+     * the room; applying it privately leaves X and the other boss alone. */
+    unsigned bg_layer=(camouflage_bg>>8)&15;
+    unsigned backdrop=bg_layer<3 && bg_colors[bg_layer]>=0?(unsigned)bg_colors[bg_layer]:palette[camouflage_bg&255];
+    unsigned added=0;
+    for(unsigned shift=0;shift<15;shift+=5) {
+      unsigned component=((rgb>>shift)&31)+((backdrop>>shift)&31);
+      added|=(component>31?31:component)<<shift;
+    }
+    rgb=added;
+  }
   bool clipped = condition(p->cgwsel >> 6, inside);
   bool math = !condition((p->cgwsel >> 4) & 3, inside) && ((p->cgadsub & 63) & (1u << layer));
-  if (dialogue_margin && layer == 5) math = false;
+  if ((dialogue_margin && layer == 5) || camouflage) math = false;
   unsigned other = p->fixedColor;
   bool half = math && (p->cgadsub & 64) && !clipped;
   if (math && (p->cgwsel & 2)) {
@@ -1657,7 +1751,7 @@ static void coop_inverted_badge_row(const Ppu *ppu,const Raster *r,int y,MmxRend
         unsigned shift=7-(col&7);
         pixel=((bits[0]>>shift)&1)|(((bits[1]>>shift)&1)<<1)|
             (((bits[16]>>shift)&1)<<2)|(((bits[17]>>shift)&1)<<3);
-      } else pixel=tile_pixel(r->vram,(ppu->obsel&7)*8192+number*16,col&7,source_row&7,4);
+      } else pixel=tile_pixel(raster_vram(r),(ppu->obsel&7)*8192+number*16,col&7,source_row&7,4);
       color=frame_art?frame_art->colors[pixel]:r->palette[128+palette*16+pixel];
     }
     objects[dx]=0xe6a1;colors[dx]=color;
@@ -1794,10 +1888,43 @@ static inline int lowest_bit(uint64_t bits) {
 #endif
 }
 
+static void rush_hud_row(const Ppu *p,const Raster *r,int y,MmxRenderView view,
+                         uint16_t *objects,int *colors) {
+  for(unsigned i=0;i<2;++i) {
+    const MmxBossRushBoss *b=&frame_rush.bosses[i];if(!b->phase) continue;
+    int x=view.width-view.extra-40+(int)i*16;
+    coop_meter_row(p,r,y,view,objects,colors,x,b->health,32,2,NULL,80,false);
+    /* $D94A's native boss footer, rather than the player's X badge. */
+    sprite(p,r,x,80,0x34aa,16,y,view,objects,false,NULL,0xaa,colors,true,false,false);
+  }
+}
+static void rush_native_text(uint32_t *out,MmxRenderView view,int x,int y,const char *s,unsigned palette) {
+  for(int row=0;row<8;++row) {
+    if(y+row<0 || y+row>=224) continue;
+    const Raster *r=&frame.lines[y+row];Ppu p={0};memcpy(&p,r->registers,sizeof(r->registers));
+    if((p.inidisp&128) && palette<8) continue;
+    for(unsigned n=0;s[n];++n) for(int col=0;col<8;++col) {
+      int dx=x+(int)n*8+col;if(dx<0 || dx>=view.width) continue;
+      unsigned pixel=tile_pixel(raster_vram(r),((p.bgTileAdr>>8)&15)*4096+(unsigned char)s[n]*8,col,row,2);
+      if(!pixel) continue;
+      /* Keep the original options font's three shades. Mammoth's stage
+       * repurposes the live text palette, making the counter/labels black.
+       * Gameplay text still follows native blanking and raster brightness;
+       * results outlive the native death palette fade. */
+      static const uint16_t menu_colors[2][4]={{0,0x7fff,0x7fe0,0x4080},{0,0x7fff,0x7fff,0x7fe0}};
+      unsigned color=palette>=7?menu_colors[palette==9][pixel]:r->palette[palette*4+pixel];uint32_t rgb=0;
+      for(unsigned c=0;c<3;++c) {
+        unsigned v=(color>>(c*5))&31;v=(v<<3)|(v>>2);if(palette<8) v=v*(p.inidisp&15)/15;
+        rgb|=v<<(16-c*8);
+      }
+      out[(y+row)*view.width+dx]=rgb;
+    }
+  }
+}
 typedef struct DrawCtx {
   uint32_t *out;
   MmxRenderView view;
-  bool hud, stage, menu, zero_menu, weapon_menu, zero_title, swapping, knc_bugfix;
+  bool hud, stage, menu, zero_menu, weapon_menu, zero_title, swapping, knc_bugfix, rush_hud;
   unsigned weapon_page, weapon_item, beam_count, palette_fade, piece_count, waiting_count;
   const uint16_t *weapon_colors;
   MmxSpriteAsset x_weapon_palette;
@@ -1821,7 +1948,7 @@ static void draw_row(const DrawCtx *c, int y) {
   MmxRenderView view = c->view;
   bool hud = c->hud, stage = c->stage, menu = c->menu, zero_menu = c->zero_menu;
   bool weapon_menu = c->weapon_menu, zero_title = c->zero_title, swapping = c->swapping;
-  bool knc_bugfix = c->knc_bugfix;
+  bool knc_bugfix = c->knc_bugfix, rush_hud = c->rush_hud;
   unsigned weapon_page = c->weapon_page, weapon_item = c->weapon_item;
   unsigned beam_count = c->beam_count, palette_fade = c->palette_fade;
   unsigned piece_count = c->piece_count, waiting_count = c->waiting_count;
@@ -1839,7 +1966,7 @@ static void draw_row(const DrawCtx *c, int y) {
   const Raster *r = &frame.lines[y]; Ppu p;
   memcpy(&p, r->registers, PPU_SAVESTATE_REGS_SIZE);
   if (beam_count) p.cgwsel = (p.cgwsel & 0xcf) | 0x20;
-  if ((p.bgmode & 7) != 1 || (!stage && !menu && !zero_title)) {
+  if ((p.bgmode & 7) != 1 || (!stage && !menu && !zero_title && !frame_rush.menu)) {
     memcpy(out + y * view.width + view.extra, frame.stock + y * 256, 256 * sizeof(*out));
     ++ROW_STATS.fallback_lines; return;
   }
@@ -1918,6 +2045,8 @@ static void draw_row(const DrawCtx *c, int y) {
         }
       }
     }
+    if(frame_rush.mode==MMX_RUSH_PLAYING && !frame.expand && s.object>=0xe68 && s.object<0x1d08 &&
+        frame_rush.owner[(s.object-0xe68)/32] && !oam_match) continue;
     /* Match original OAM before reprojection. HUD and native script panels
      * keep screen coordinates; world pieces use the selected peer origin. */
     if(stage) {s.x-=view_dx;s.y-=view_dy;}
@@ -1927,6 +2056,11 @@ static void draw_row(const DrawCtx *c, int y) {
      * when substituting art, including a missing section's resource. */
     unsigned attr = asset ? (s.attr & 0xf000) | ((asset->attributes & 15) << 8) |
         (asset->live_tiles ? s.attr & 255 : 0) : s.attr;
+    /* Cross-stage actors have no live allocation. Their resource supplies
+     * the native priority as well as CHR/palette; retain authored flips. */
+    if(asset && frame_rush.mode==MMX_RUSH_PLAYING && s.object>=0xe68 && s.object<0x1d08 &&
+        frame_rush.owner[(s.object-0xe68)/32])
+      attr=(attr&~0x3000u)|((asset->attributes&0x30)<<8);
     if (asset && asset->live_colors) attr = (attr & ~0x0e00u) | (s.attr & 0x0e00u);
     if (zero_armor || swap_actor || triad_armor || frozen_enemy) continue;
     if (zero_charge && MmxZeroHasChargeArt() && !frame.ram[0xbdb] && !weapon_item) continue;
@@ -2066,7 +2200,16 @@ static void draw_row(const DrawCtx *c, int y) {
     bool zero_icon = (stage || zero_menu) && MmxZeroEnabled() && !frame_zero.active_x && slot == 0 &&
         x == 8 && sy == 80 && attr == 0x3486 && size == 16;
     bool anchored = stage && hud && sy < 96 && (slot < 16 || (bar_count >= 4 && slot >= bar_first && slot < bar_first + bar_count));
-    if(stage && !anchored) {x-=view_dx;sy-=view_dy;}
+    bool reprojected = stage && !anchored && (view_dx || view_dy);
+    if(reprojected) {
+      /* OAM hides unused slots below the native viewport while retaining
+       * their old tiles. Moving those slots into a distant peer view would
+       * resurrect stale player/platform strips. A genuine top-edge sprite
+       * wraps past y=255; unwrap it before applying the world-view offset. */
+      if(sy>=224 && sy+size<=256) continue;
+      if(sy>=224) sy-=256;
+      x-=view_dx;sy-=view_dy;
+    }
     if (anchored) { if (x < 25) x -= view.extra; else if (x >= 216) x += view.extra; }
     if (stage && frame_weapons.page && frame_weapons.weapon && slot == 7 && (pos & 255) == 24 && sy == 80 && attr == 0x3620) {
       /* Dedicated source gameplay footer, with its original frame,
@@ -2083,7 +2226,7 @@ static void draw_row(const DrawCtx *c, int y) {
       }
       continue;
     }
-    sprite(&p, r, x, sy, attr, size, y, view, objects, false, NULL, 0, object_colors, false, zero_icon, false);
+    sprite(&p, r, x, sy, attr, size, y, view, objects, false, NULL, 0, object_colors, reprojected, zero_icon, false);
   }
   if (charge && zero_drawn[0] && !swapping) {
     int zx=(int16_t)(word(frame.ram,0xbad)-view_camera(frame.ram,0x1e4d));
@@ -2107,15 +2250,22 @@ static void draw_row(const DrawCtx *c, int y) {
     world_sprite_row(&frame_world_sprites[i], y, view, objects, object_colors);
   if (swapping) teleport_actor_row(frame.ram,&frame_zero,&p,r,y,view,objects,object_colors);
   if(coop_hud) coop_hud_row(&p,r,y,view,hud,objects,object_colors);
+  if(rush_hud) rush_hud_row(&p,r,y,view,objects,object_colors);
+  const bool rush_arena = stage && frame.ram[0x1f7a] == 4 &&
+      (frame_rush.mode == MMX_RUSH_PLAYING || frame_rush.mode == MMX_RUSH_PREPARING);
   bool memo_valid = false, memo_inside = false, memo_dialogue = false;
-  uint16_t memo_main = 0, memo_sub = 0;
+  uint16_t memo_main = 0, memo_sub = 0, memo_camouflage = 0;
   int memo_object = 0, memo_bg[3] = {0, 0, 0};
   uint32_t memo_rgb = 0;
   PlainBg plain[3];
   bool plain_ok[3];
   for (int layer = 0; layer < 3; ++layer) {
     plain_bg_init(&plain[layer], &p, r, (unsigned)layer);
-    plain_ok[layer] = g_mmx_render_fast_paths && !view_dx && !view_dy && !(layer == 0 && !stage);
+    /* background() rewrites BG1 off-stage (weapon menu) and in the Boss Rush
+     * arena (ceiling handle, belt colors), and BG3 on the Boss Rush title
+     * menu; the plain path would skip all of them. */
+    plain_ok[layer] = g_mmx_render_fast_paths && !view_dx && !view_dy && !(layer == 0 && !stage) &&
+        !(layer == 0 && rush_arena) && !(layer == 2 && !stage && frame_rush.menu);
   }
   for (int sx = 0; sx < view.width; ++sx) {
     int x = sx - view.extra;
@@ -2135,12 +2285,14 @@ static void draw_row(const DrawCtx *c, int y) {
       for (int layer = 0; layer < 3; ++layer) if (bg_colors[layer] >= 0)
         bg_colors[layer] = MmxRenderAssetsFadeColor((uint16_t)bg_colors[layer], palette_fade);
       if (object_colors[sx] >= 0)
-        object_colors[sx] = MmxRenderAssetsFadeColor((uint16_t)object_colors[sx], palette_fade);
+        object_colors[sx] = MmxRenderAssetsFadeColor((uint16_t)object_colors[sx], palette_fade)|(object_colors[sx]&0x8000);
     }
+    uint16_t camouflage_bg=0x500;
     for (int sub = 0; sub < 2; ++sub) {
       for (int layer = 0; layer < 3; ++layer)
         if ((p.screenEnabled[sub] & (1 << layer)) &&
             (!(p.screenWindowed[sub] & (1 << layer)) || !window(&p, layer, x, view.extra)) && bg[layer] > screens[sub]) screens[sub] = bg[layer];
+      if(!sub) camouflage_bg=screens[0];
       if ((p.screenEnabled[sub] & 16) && (!(p.screenWindowed[sub] & 16) || !window(&p, 4, x, view.extra)) &&
           objects[sx] > screens[sub]) screens[sub] = objects[sx];
     }
@@ -2157,13 +2309,14 @@ static void draw_row(const DrawCtx *c, int y) {
     if (!memo_valid || !g_mmx_render_fast_paths || screens[0] != memo_main || screens[1] != memo_sub ||
         color_window != memo_inside || object_colors[sx] != memo_object ||
         bg_colors[0] != memo_bg[0] || bg_colors[1] != memo_bg[1] ||
-        bg_colors[2] != memo_bg[2] || dialogue_margin != memo_dialogue) {
+        bg_colors[2] != memo_bg[2] || dialogue_margin != memo_dialogue ||
+        camouflage_bg != memo_camouflage) {
       memo_rgb = colour(&p, r->palette, brightness, screens[0], screens[1], color_window,
-                        object_colors[sx], bg_colors, dialogue_margin);
+                        object_colors[sx], bg_colors, dialogue_margin, camouflage_bg);
       memo_valid = true; memo_main = screens[0]; memo_sub = screens[1];
       memo_inside = color_window; memo_object = object_colors[sx];
       memo_bg[0] = bg_colors[0]; memo_bg[1] = bg_colors[1]; memo_bg[2] = bg_colors[2];
-      memo_dialogue = dialogue_margin;
+      memo_dialogue = dialogue_margin; memo_camouflage = camouflage_bg;
     }
     out[y * view.width + sx] = memo_rgb;
   }
@@ -2284,14 +2437,33 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   memset(&stats, 0, sizeof(stats)); stats.pieces = frame.piece_count;
   memset(door_cache, 0, sizeof(door_cache));
   memset(out, 0, (size_t)view.width * 224 * sizeof(*out));
+  if(frame_rush.mode==MMX_RUSH_FINISHED) {
+    /* Own the whole page so native death flashes, HUD badges and the world
+     * cannot bleed through the options-style results screen. */
+    int center=view.width/2;char score[40];
+    rush_native_text(out,view,center-36,48,"GAME OVER",8);
+    snprintf(score,sizeof(score),"DEFEATED %u",frame_rush.defeated);
+    rush_native_text(out,view,center-(int)strlen(score)*4,80,score,8);
+    uint32_t best=MmxBossRushHighScore();if(best<frame_rush.defeated) best=frame_rush.defeated;
+    snprintf(score,sizeof(score),"HIGH SCORE %u",best);
+    rush_native_text(out,view,center-(int)strlen(score)*4,96,score,8);
+    rush_native_text(out,view,center-20,136,"RETRY",frame_rush.result_selection?8:9);
+    rush_native_text(out,view,center-36,160,"MAIN MENU",frame_rush.result_selection?9:8);
+    rush_native_text(out,view,center-68,frame_rush.result_selection?160:136,">",9);
+    return true;
+  }
   bool zero_menu = zero_weapons_menu();
   bool weapon_menu = MmxWeaponsMenuVisible(frame.ram);
-  bool menu = zero_menu || weapon_menu;
+  /* Plain X's menu normally uses the stock frame. During a Rush fade it
+   * still needs private art until the last matching boss OAM disappears. */
+  bool menu = zero_menu || weapon_menu ||
+      (!MmxWidePolicy_IsStageScene(frame.ram) && rush_pause_art_needed());
   bool zero_title = zero_title_menu();
   bool stage = MmxWidePolicy_IsStageScene(frame.ram) && !menu;
+  bool rush_hud = stage && frame_rush.loaded;
   view_dx=view_dy=0;
   if(stage && peer_seat>=0 && frame_coop.initialized && MmxCoopViewsOnline()) {
-    MmxCoopView camera=MmxCoopViewForPlayer(frame.ram,&frame_coop,(unsigned)peer_seat);
+    MmxCoopView camera=MmxCoopViewWithBounds(frame.ram,&frame_coop,(unsigned)peer_seat,&frame_bounds);
     view_dx=camera.x-(int)word(frame.ram,0x1e4d);
     view_dy=camera.y-(int)word(frame.ram,0x1e50);
   }
@@ -2359,9 +2531,51 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
       fortress_waiting_pieces(waiting, pieces, piece_count) : 0;
   const MmxSpriteAsset *waiting_zero = waiting_count ? MmxRenderAssetsCaptiveZero() : NULL;
   const MmxSpriteAsset *piece_assets[MAX_PIECES] = {0};
-  if (stage && g_mmx_render_asset_repairs) for (unsigned i = 0; i < piece_count; ++i) {
+  MmxSpriteAsset camouflage_art;
+  MmxSpriteAsset rush_flash_art[2];
+  bool rush_flash_ready[2]={false,false};
+  bool camouflage_ready=false;
+  if ((stage || frame_rush.mode==MMX_RUSH_PLAYING) && g_mmx_render_asset_repairs) for (unsigned i = 0; i < piece_count; ++i) {
     const Piece *s = &pieces[i];
-    const MmxSpriteAsset *a = MmxRenderAssetsObjectSprite(frame.ram, s->object, s->animation);
+    const MmxSpriteAsset *a = stage ? MmxRenderAssetsObjectSprite(frame.ram, s->object, s->animation) : NULL;
+    /* The menu reuses $1928..$1988 for armor and its player preview. Other
+     * still-visible boss pieces retain private art through the transition. */
+    if(frame_rush.mode==MMX_RUSH_PLAYING && s->object>=0xe68 && s->object<0x1d08 &&
+        !(menu && s->object>=0x1928 && s->object<=0x1988)) {
+      unsigned owner=frame_rush.owner[(s->object-0xe68)/32];
+      if(owner && owner<=2) {
+        const MmxSpriteAsset *private=MmxRenderAssetsRushObjectSprite(frame.ram,s->object,
+            kMmxBossRushBosses[frame_rush.bosses[owner-1].id].stage,s->animation);
+        if(private) a=private;
+        unsigned seat=owner-1;
+        if(private && s->object==frame_rush.bosses[seat].object &&
+            frame_rush.bosses[seat].id==5 && s->animation==0x23 &&
+            frame_rush_visual.initialized[seat] &&
+            frame_rush_visual.generation[seat]==frame_rush.bosses[seat].generation) {
+          if(!camouflage_ready) {
+            camouflage_art=*private;
+            memcpy(camouflage_art.colors,frame_rush_visual.colors[seat],sizeof(camouflage_art.colors));
+            /* $C1 is entry 24 in the per-actor scene flags. */
+            if(frame_rush.bosses[seat].globals[24]==2)
+              for(unsigned c=0;c<16;++c) camouflage_art.colors[c]|=0x8000;
+            camouflage_ready=true;
+          }
+          a=&camouflage_art;
+        }
+        /* Keep private CHR, but let the native palette-zero hit flash use
+         * live CGRAM. Mammoth's trunk copies its parent's $11 at $82:9665. */
+        bool body=s->object==frame_rush.bosses[seat].object ||
+            (frame_rush.bosses[seat].id==7 && frame.ram[s->object+10]==0x0e &&
+             word(frame.ram,s->object+12)==frame_rush.bosses[seat].object);
+        if(private && body && !(s->attr&0x0e00) && (private->attributes&14)) {
+          if(!rush_flash_ready[seat]) {
+            rush_flash_art[seat]=*a;rush_flash_art[seat].live_colors=true;
+            rush_flash_ready[seat]=true;
+          }
+          a=&rush_flash_art[seat];
+        }
+      }
+    }
     /* OBJ palette 0 is the shared hit flash. If the current CHR binding
      * still matches, that deliberate palette change must remain live. */
     bool hit_flash = a && a->current &&
@@ -2382,7 +2596,7 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   DrawCtx *c = &s_draw;
   c->out = out; c->view = view; c->hud = hud; c->stage = stage; c->menu = menu;
   c->zero_menu = zero_menu; c->weapon_menu = weapon_menu; c->zero_title = zero_title;
-  c->swapping = swapping; c->knc_bugfix = knc_bugfix;
+  c->swapping = swapping; c->knc_bugfix = knc_bugfix; c->rush_hud = rush_hud;
   c->weapon_page = weapon_page; c->weapon_item = weapon_item;
   c->weapon_colors = weapon_colors; c->x_weapon_palette = x_weapon_palette;
   memcpy(c->beams, beams, sizeof(c->beams)); c->beam_count = beam_count;
@@ -2416,5 +2630,20 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   render_rows();
   for (unsigned i = 0; i < frame_debug_rect_count; ++i)
     draw_debug_rect(out, view, &frame_debug_rects[i]);
+  if(stage) {
+    MmxBossRushState draw_rush=frame_rush;
+    for(unsigned i=0;i<2;++i) {
+      draw_rush.bosses[i].death_x-=view_camera(frame.ram,0x1e4d)-frame_rush.camera_x;
+      draw_rush.bosses[i].death_y-=view_camera(frame.ram,0x1e50)-frame_rush.camera_y;
+    }
+    MmxBossRushDraw(out,view.width,view.extra,&draw_rush);
+  }
+  if(rush_hud && frame_rush.mode==MMX_RUSH_PLAYING) {
+    char count[32];snprintf(count,sizeof(count),"DEFEATED %u",frame_rush.defeated);
+    rush_native_text(out,view,view.width/2-(int)strlen(count)*4,208,count,7);
+    static const char *const labels[]={"CP","SM","AA","LO","BK","SC","SE","FM"};
+    for(unsigned i=0;i<2;++i) if(frame_rush.bosses[i].phase)
+      rush_native_text(out,view,view.width-40+(int)i*16,96,labels[frame_rush.bosses[i].id],7);
+  }
   return true;
 }

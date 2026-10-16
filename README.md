@@ -18,6 +18,7 @@ The launcher, mods, password saves, save states and rewind all come with it.
 - **60 FPS** with frame pacing locked to the Switch display.
 - **16:9 widescreen** (on by default) with an anchored HUD.
 - **Playable Zero** (X3, Modern or **Saber Zero** behavior), **X / Zero co-op**, and the **X2 / X3 boss weapons**, using your own X2/X3 ROMs.
+- **Boss Rush**: an endless two-at-a-time Maverick gauntlet with a high score, picked from the title menu.
 - **The full launcher** on the console: Mods, Controls and Settings. It works with a controller or the touchscreen, and has a built-in SD-card file browser.
 - **Password saves**, a **save-state browser** and **rewind**.
 - **Bring your own ROM.** The NRO contains no ROM data, graphics or music. It reads them from your own ROM.

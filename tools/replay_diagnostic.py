@@ -13,7 +13,7 @@ import tomllib
 
 def inspect(path):
     lines = path.read_text(encoding="utf-8").splitlines()
-    if len(lines) < 4 or lines[0] != "MMXREPLAY 1":
+    if len(lines) < 4 or lines[0] not in ("MMXREPLAY 1", "MMXREPLAY 2", "MMXREPLAY 3"):
         raise ValueError("unsupported or truncated replay header")
     frames = checkpoints = 0
     unfinished = False

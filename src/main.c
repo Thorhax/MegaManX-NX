@@ -22,9 +22,12 @@
 #include "mmx_netplay.h"
 #include "mmx_startup.h"
 #include "mmx_coop_trace.h"
+#include "mmx_coop.h"
 #include "mmx_coop_view.h"
 #include "mmx_replay.h"
 #include "desktop/sdl_compat.h"
+#include "mmx_boss_rush.h"
+#include "mmx_boss_rush_audio.h"
 #include "netplay/snes_netplay.h"
 #include "host_paths.h"
 #include "snes_savestate_menu.h"
@@ -53,7 +56,7 @@ static void MmxPrepareFrame(int dw, int dh, int *w, int *h) {
   /* A room has one logical field. Window size and each peer's offline pixel
    * preference cannot widen it. The offline setting is never overwritten. */
   SnesDisplayAspect aspect = SnesDisplayAspect_Clamp(MmxNetplayActive() ? 0 : g_config.display_aspect);
-  g_mmx_custom_renderer = !MMX_VARIANT_JP && (g_config.widescreen || MmxZeroEnabled() || MmxWeaponsEnabled() || MmxKncBugfixActive(0) || MmxKncBugfixActive(1));
+  g_mmx_custom_renderer = !MMX_VARIANT_JP && (g_config.widescreen || MmxZeroEnabled() || MmxWeaponsEnabled() || MmxKncBugfixActive(0) || MmxKncBugfixActive(1) || MmxBossRushActive() || MmxBossRushGetState().menu);
   g_mmx_custom_view = MmxRendererViewport(g_mmx_custom_aspect, dw, dh,
       aspect);
   if (!g_config.widescreen) {
@@ -127,6 +130,7 @@ static void MmxBeforeFrame(void) {
     MmxZeroSetCollisionRom(g_snes->cart->rom, g_snes->cart->romSize);
     MmxWeaponsCollisionRom(g_snes->cart->rom, g_snes->cart->romSize);
     MmxCoopHostFrame();
+    MmxBossRushHostFrame();
   }
   MmxRendererHoldFrame(MmxCoopTransitionActive());
   if (g_mmx_custom_renderer) MmxRendererLatchSprites();
@@ -232,10 +236,17 @@ static void MmxAfterConfig(void) {
     g_config.output_method = kOutputMethod_SDL;
   }
 }
+static void MmxShutdown(void) {
+  /* SDL owns the worker-thread handles. Drain them before host SDL teardown;
+   * the idempotent atexit handlers remain a fallback for earlier exits. */
+  MmxReplayShutdown();
+  MmxCoopSetDiagnosticsEnabled(false);
+}
 static void MmxAfterFrame(const SnesDesktopHostFrameStats *stats) {
   if (MmxReplayPlaying() && (MmxReplayFinished() || MmxReplayFailed())) {
     SDL_Event quit = {0}; quit.type = SDL_QUIT; SDL_PushEvent(&quit);
   }
+  MmxBossRushAudioPresent();
   /* Netplay resimulates frames and must never pause for disk writes. */
   MmxCoopTraceAfterFrame(!MmxNetplayActive());
   if (s_benchmark_frames && stats->frame == (unsigned)s_benchmark_frames) {
@@ -352,6 +363,7 @@ int MMX_DESKTOP_ENTRY(int argc, char **argv) {
     .configure_launcher = MmxNetplayConfigureLauncher,
     .prepare_netplay = MmxNetplayPrepare,
     .netplay_ready = MmxNetplayReady,
+    .on_shutdown = MmxShutdown,
   };
   int result = snesrecomp_desktop_main(&game, argc, argv);
   /* On Switch the homebrew loader starts the next NRO (this one again, for

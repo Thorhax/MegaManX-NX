@@ -496,6 +496,12 @@ void MmxSaberWaveRuntimeSetCollisionRecord(const uint8_t *record,
   collision_record_valid = true;
 }
 
+bool MmxSaberWaveRuntimeGetCollisionRecord(uint8_t out[MMX_SABER_WAVE_COLLISION_RECORD_BYTES]) {
+  if(!out || !collision_record_valid) return false;
+  memcpy(out,collision_record,sizeof(collision_record));
+  return true;
+}
+
 void MmxSaberWaveRuntimeCollisionRom(uint8_t *rom, size_t size) {
   static const uint8_t empty[MMX_SABER_WAVE_COLLISION_RECORD_BYTES] =
       {0xff, 0xff, 0xff, 0xff};

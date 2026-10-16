@@ -9,6 +9,8 @@
 #include "mmx_coop_trace.h"
 #include "mmx_replay.h"
 #include "mmx_coop_view.h"
+#include "mmx_boss_rush.h"
+#include "mmx_boss_rush_audio.h"
 #include "variables.h"
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
@@ -376,7 +378,7 @@ void mmx_host_yield(uint8_t countdown) {
 #include "snes/saveload.h"
 
 #define MMX_SAV_CHUNK_MAGIC   0x4D4D5854u  /* "MMXT" */
-#define MMX_SAV_CHUNK_VERSION 18u /* Zero extension (Saber) state */
+#define MMX_SAV_CHUNK_VERSION 22u /* per-seat authored camera bounds */
 
 typedef struct MmxSavChunk {
   uint32_t magic, version;
@@ -412,7 +414,11 @@ static MmxWeaponCombatState g_load_weapon_combat;
 static MmxCoopState g_load_coop;
 static MmxKncBugfixState g_load_knc_bugfix;
 static MmxCoopViewWorldState g_load_views;
+static MmxCoopViewBoundsState g_load_view_bounds;
 static uint8_t g_load_zero_extension[MMX_ZERO_EXTENSION_STATE_BYTES];
+static MmxBossRushState g_load_rush;
+static MmxBossRushAudioState g_load_rush_audio;
+static MmxBossRushVisualState g_load_rush_visual;
 
 void MmxStateSaveExtra(struct SaveLoadInfo *sli) {
   MmxSavChunk c;
@@ -463,6 +469,14 @@ void MmxStateSaveExtra(struct SaveLoadInfo *sli) {
   uint8_t zero_extension[MMX_ZERO_EXTENSION_STATE_BYTES];
   MmxZeroExtSaveState(zero_extension);
   sli->func(sli,zero_extension,sizeof(zero_extension));
+  MmxBossRushState rush=MmxBossRushGetState();
+  sli->func(sli,&rush,sizeof(rush));
+  MmxBossRushAudioState audio=MmxBossRushAudioGetState();
+  sli->func(sli,&audio,sizeof(audio));
+  MmxBossRushVisualState visual=MmxBossRushVisualGetState();
+  sli->func(sli,&visual,sizeof(visual));
+  MmxCoopViewBoundsState bounds=MmxCoopViewsGetBoundsState();
+  sli->func(sli,&bounds,sizeof(bounds));
 }
 
 void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
@@ -475,7 +489,11 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
   memset(&g_load_coop, 0, sizeof(g_load_coop));
   memset(&g_load_knc_bugfix,0,sizeof(g_load_knc_bugfix));
   memset(&g_load_views,0,sizeof(g_load_views));
+  memset(&g_load_view_bounds,0,sizeof(g_load_view_bounds));
   memset(g_load_zero_extension,0,sizeof(g_load_zero_extension));
+  memset(&g_load_rush,0,sizeof(g_load_rush));
+  memset(&g_load_rush_audio,0,sizeof(g_load_rush_audio));
+  memset(&g_load_rush_visual,0,sizeof(g_load_rush_visual));
   memset(&g_load_chunk, 0, sizeof(g_load_chunk));
   sli->func(sli, &g_load_chunk, sizeof(g_load_chunk));
   if (g_load_chunk.magic == MMX_SAV_CHUNK_MAGIC &&
@@ -548,9 +566,38 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
     } else g_load_chunk_ok=0;
   }
   if(g_load_complete && g_load_chunk.version>=18) {
-    if(RtlStateBytesRemaining(sli)>=sizeof(g_load_zero_extension))
+    /* Main shipped v18 with only the Zero extension; the original Rush
+     * previews used v18..20 for Rush/audio/fades without that extension.
+     * Their bounded tail lengths distinguish the two v18 formats. New v21
+     * always stores the extension first, followed by all three Rush states. */
+    size_t rush_bytes=sizeof(g_load_rush)+
+        (g_load_chunk.version>=19?sizeof(g_load_rush_audio):0)+
+        (g_load_chunk.version>=20?sizeof(g_load_rush_visual):0);
+    size_t remaining=RtlStateBytesRemaining(sli);
+    bool extension=g_load_chunk.version>=21 ||
+        (g_load_chunk.version==18 && remaining==sizeof(g_load_zero_extension));
+    bool rush=g_load_chunk.version>=21 || !extension;
+    size_t expected=(extension?sizeof(g_load_zero_extension):0)+(rush?rush_bytes:0)+
+        (g_load_chunk.version>=22?sizeof(g_load_view_bounds):0);
+    if(remaining!=expected) g_load_chunk_ok=0;
+    if(g_load_chunk_ok && extension)
       sli->func(sli,g_load_zero_extension,sizeof(g_load_zero_extension));
-    else g_load_chunk_ok=0;
+    if(g_load_chunk_ok && rush) {
+      sli->func(sli,&g_load_rush,sizeof(g_load_rush));
+      if(!MmxBossRushValidState(&g_load_rush)) g_load_chunk_ok=0;
+    }
+    if(g_load_chunk_ok && rush && g_load_chunk.version>=19) {
+      sli->func(sli,&g_load_rush_audio,sizeof(g_load_rush_audio));
+      if(!MmxBossRushAudioValidState(&g_load_rush_audio)) g_load_chunk_ok=0;
+    }
+    if(g_load_chunk_ok && rush && g_load_chunk.version>=20) {
+      sli->func(sli,&g_load_rush_visual,sizeof(g_load_rush_visual));
+      if(!MmxBossRushVisualValidState(&g_load_rush_visual)) g_load_chunk_ok=0;
+    }
+    if(g_load_chunk_ok && g_load_chunk.version>=22) {
+      sli->func(sli,&g_load_view_bounds,sizeof(g_load_view_bounds));
+      if(!MmxCoopViewsValidBoundsState(&g_load_view_bounds)) g_load_chunk_ok=0;
+    }
   }
   if(g_load_complete && g_load_chunk.version<16)
     g_load_views.contact_player=g_load_coop.anchor;
@@ -564,6 +611,13 @@ static int MmxWsMargin(void);
 void MmxOnStateLoaded(uint32_t version) {
   MmxReplayStateLoaded();
   MmxRendererReset();
+  if(g_load_chunk_ok && g_load_complete) MmxBossRushSetState(&g_load_rush);
+  else MmxBossRushReset();
+  MmxBossRushVisualState empty_visual={0};
+  MmxBossRushVisualSetState(g_load_chunk_ok && g_load_complete?&g_load_rush_visual:&empty_visual);
+  MmxBossRushAudioReset();
+  if(g_load_chunk_ok && g_load_complete) MmxBossRushAudioSetState(&g_load_rush_audio);
+  if(!RtlIsRollbackLoad()) MmxBossRushAudioLoaded();
   MmxKncBugfixSetState(g_load_knc_bugfix);
   s_ws_recover_armor = g_mmx_custom_renderer && MmxWidePolicy_PrematureRideArmor(g_ram);
   if (g_mmx_custom_renderer && !g_load_native_streakers) {
@@ -589,6 +643,7 @@ void MmxOnStateLoaded(uint32_t version) {
   if (complete && g_load_chunk.version >= 14) MmxCoopSetState(&g_load_coop);
   else MmxCoopReset();
   MmxCoopViewsSetWorldState(&g_load_views);
+  MmxCoopViewsSetBoundsState(&g_load_view_bounds);
   MmxCoopTraceStateLoaded();
   if (version < 5 || !g_load_chunk_ok) {
     /* Legacy v4 save: no chunk, no rebuild — preserve the historical
@@ -897,6 +952,7 @@ void MmxDrawPpuFrame(void) {
 }
 
 void RunOneFrameOfGame(void) {
+  RtlSetPadState(0,MmxBossRushFilterInput(RtlGetPadState(0)));
   s_graphics_frame_start = g_cpu.master_cycles;
   s_graphics_frame_active = g_did_reset;
 #if !MMX_VARIANT_JP
@@ -1023,6 +1079,8 @@ void RunOneFrameOfGame(void) {
     }
   }
   cpu_trace_px_breadcrumb(&g_cpu, 0x2002, "before_Internal");
+  MmxBossRushFrame(g_ram,RtlGetPadState(0));
+  if(MmxBossRushGetState().mode==MMX_RUSH_FINISHED) return;
   MmxKncBugfixTick(g_ram,RtlGetPadState(0),RtlGetPadState(1));
   if (MmxCoopEnabled()) MmxCoopPoll(RtlGetPadState(0), RtlGetPadState(1));
   else if (MmxZeroSwapTick(g_ram)) return;
@@ -1080,6 +1138,7 @@ void RunOneFrameOfGame(void) {
   MmxCoopLiftCarry(g_ram);
   MmxCoopSyncPriority(g_ram);
   MmxCoopCapture(g_ram);
+  MmxBossRushAfterFrame(g_ram);
   MmxCoopTraceFrame(g_ram);
   /* Out of play (death, level setup, arrival) the widened spawn cursor is
    * stale; drop it even when no scan runs before play resumes. */
@@ -2032,6 +2091,7 @@ static void MmxWideStateApply(bool loaded) {
  * recovers (GitHub #45). Runs on the main fiber, never inside a slot fiber,
  * so every slot fiber can be deleted here. */
 void MmxOnHardwareReset(void) {
+  MmxBossRushReset();MmxBossRushAudioReset();
   MmxCoopReset();
   for (int i = 0; i < MMX_NSLOTS; i++) {
     if (g_slot_fiber[i] != NULL) {

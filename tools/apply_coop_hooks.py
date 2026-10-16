@@ -16,7 +16,9 @@ TARGETS = {0x01812e, 0x048fca, 0x0280b4, 0xd2bd, 0xd3dd, 0xd3fa, 0xd43a, 0xd457,
            # $84:9A02: the canister's ($4D) side-contact test; canister_side_hook.
            0x049a02,
            # $83:8129: an empty Ride Armor's idle/boarding state; armor_board_hook.
-           0x038129}
+           0x038129,
+           # Armadillo's map-coordinate wrap must also move the stored seat.
+           0x01f9b7}
 VIEW_TARGETS={0x00dc36,0x00dcdb,0x02806e,0x02808f,0x00d4aa}
 TARGETS |= VIEW_TARGETS
 # Routed through the interpreter when the generated code has them as entries,

@@ -1,6 +1,7 @@
 #include "mmx_render_assets.h"
 #include "mmx_wide_policy.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* The same ROM compression/transfer format used by mmx_wide_preview.c,
  * applied to live animation pieces, without allocating guest VRAM/CGRAM. */
@@ -20,11 +21,20 @@ static bool charged_buster_ready[2][21];
 static MmxSpriteAsset player_weapons[9][2];
 static uint8_t player_weapon_ready[9];
 static uint8_t ready[256], sprite_resource[256];
+static uint16_t asset_palette[256], rush_palette[13][256];
 static unsigned cached_stage = ~0u, cached_section = ~0u;
+static MmxSpriteAsset *rush_assets[13][256];
+static uint8_t rush_ready[13][256];
+static MmxSpriteAsset rush_pose[128];
+static uint64_t rush_pose_key[128];
+static uint8_t *decoded_resources[256];
+static size_t decoded_sizes[256];
 static unsigned bg_stage = ~0u;
 static uint8_t bg_phase[2][8192], bg_chr[16][65536];
 static bool bg_chr_valid[16][2048], bg_chr_ready[16], bg_palette_ready[16];
 static MmxBackgroundPalette bg_palette[16];
+static int rush_ceiling[64*24];
+static bool rush_ceiling_ready;
 static bool range(size_t a, size_t n) { return a <= rom_size && n <= rom_size - a; }
 static unsigned word(size_t a) { return range(a, 2) ? rom[a] | (rom[a + 1] << 8) : 0; }
 static size_t lorom(unsigned a) { return ((a >> 16) & 127) * 0x8000u + (a & 0x7fff); }
@@ -60,13 +70,21 @@ void MmxRenderAssetsSetRom(const uint8_t *bytes, size_t size) {
   rom = bytes; rom_size = size;
   cached_stage = cached_section = ~0u;
   bg_stage = ~0u;
+  rush_ceiling_ready=false;
   captive_zero_ready = 0;
   teleport_x_ready = false;
   death_orbs_ready = false;
   memset(dash_effect_ready,0,sizeof(dash_effect_ready));
   memset(charged_buster_ready,0,sizeof(charged_buster_ready));
   memset(player_weapon_ready,0,sizeof(player_weapon_ready));
+  for(unsigned stage=0;stage<13;++stage) for(unsigned sprite=0;sprite<256;++sprite) {
+    free(rush_assets[stage][sprite]);rush_assets[stage][sprite]=NULL;
+  }
+  for(unsigned id=0;id<256;++id) {free(decoded_resources[id]);decoded_resources[id]=NULL;}
+  memset(decoded_sizes,0,sizeof(decoded_sizes));
+  memset(rush_ready,0,sizeof(rush_ready));memset(rush_pose_key,0,sizeof(rush_pose_key));
 }
+static int MmxRenderAssetsRushCeilingPixel_unlocked(unsigned x,unsigned y);
 static const MmxSpriteAsset *MmxRenderAssetsWeaponX_unlocked(unsigned weapon, bool body) {
   if (weapon>8 || !rom) return NULL;
   if (player_weapon_ready[weapon])
@@ -206,7 +224,7 @@ static const MmxSpriteAsset *MmxRenderAssetsTeleportX_unlocked(unsigned pose) {
   }
   return &teleport_x[index];
 }
-static size_t decode_resource(unsigned id, uint8_t decoded[65536]) {
+static size_t decode_resource_uncached(unsigned id, uint8_t decoded[65536]) {
   size_t info = 0x376f7 + id * 5;
   if (!range(info, 5)) return 0;
   size_t count = word(info), pos = lorom(word(info + 2) | (rom[info + 4] << 16));
@@ -220,6 +238,107 @@ static size_t decode_resource(unsigned id, uint8_t decoded[65536]) {
     }
   }
   return count;
+}
+static const uint8_t *resource_data(unsigned id,size_t *size) {
+  *size=0;if(id>=256 || !rom) return NULL;
+  if(!decoded_sizes[id]) {
+    uint8_t data[65536];size_t count=decode_resource_uncached(id,data);
+    if(!count) {decoded_sizes[id]=SIZE_MAX;return NULL;}
+    uint8_t *copy=malloc(count);if(!copy) return NULL;
+    memcpy(copy,data,count);decoded_resources[id]=copy;decoded_sizes[id]=count;
+  }
+  if(decoded_sizes[id]==SIZE_MAX) return NULL;
+  *size=decoded_sizes[id];return decoded_resources[id];
+}
+static size_t decode_resource(unsigned id,uint8_t decoded[65536]) {
+  size_t count;const uint8_t *data=resource_data(id,&count);
+  if(data) memcpy(decoded,data,count);return count;
+}
+static void MmxRenderAssetsPreloadRush_unlocked(void) {
+  if(!rom || !range(0x32cee,26)) return;
+  /* The eight Maverick stages own their boss and child graphics sets.
+   * Decode each distinct resource once from the owner's ROM at launch. */
+  for(unsigned stage=1;stage<=8;++stage) {
+    unsigned start=word(0x32cee + stage*2),end=word(0x32cee + stage*2+2);
+    if(end<start || end-start>128) continue;
+    for(unsigned section=0;section<(end-start)/2;++section) {
+      size_t p=0x32cee + word(0x32cee + start+section*2);
+      for(unsigned n=0;n<64 && range(p,6) && rom[p]!=255;++n,p+=6) {
+        size_t count;resource_data(rom[p],&count);
+      }
+    }
+  }
+  MmxRenderAssetsRushCeilingPixel_unlocked(0,0);
+}
+static int MmxRenderAssetsRushCeilingPixel_unlocked(unsigned x,unsigned y) {
+  if(x>=64 || y>=24 || !rom) return -1;
+  if(!rush_ceiling_ready) {
+    rush_ceiling_ready=true;
+    for(unsigned i=0;i<64*24;++i) rush_ceiling[i]=-1;
+    /* The native layout RLE selects screen ($1E,$01). Its 32x32 blocks
+     * select 16x16 metatiles, which retain the original tile flips/priority.
+     * Use ROM tables directly; never borrow the arena's VRAM or palettes. */
+    const unsigned stage=8;
+    size_t directory=0x30d24+stage*3;
+    if(!range(directory,3)) return -1;
+    size_t p=lorom(word(directory)|(rom[directory+2]<<16));
+    if(!range(p,3) || rom[p]<=30 || rom[p+1]<=1 || rom[p]>32 || rom[p+1]>32) return -1;
+    unsigned wanted=rom[p]+30,cell=0,screen=256;p+=3;
+    for(unsigned guard=0;guard<1024 && range(p,2) && rom[p]!=255;++guard,p+=2) {
+      unsigned count=rom[p]&127;
+      if(!count) return -1;
+      if(wanted>=cell && wanted-cell<count) {
+        screen=(rom[p+1]+((rom[p]&128)?0:wanted-cell))&255;break;
+      }
+      cell+=count;
+    }
+    if(screen==256) return -1;
+    size_t tables[3];
+    for(unsigned i=0;i<3;++i) {
+      directory=0x30d93+i*0x6f+stage*3;
+      if(!range(directory,3)) return -1;
+      tables[i]=lorom(word(directory)|(rom[directory+2]<<16));
+    }
+    size_t count;const uint8_t *chr=resource_data(0x0c,&count);
+    if(!chr) return -1;
+    /* $85:E2E0 is Penguin's native base BG palette (DIZ). The mount uses
+     * its $10 group; room palette phase 2 replaces the $70 pink panel. */
+    uint16_t colors[128]={0};bool valid[128]={false};
+    if(!range(0x2e300,32)) return -1;
+    for(unsigned i=0;i<16;++i) {colors[16+i]=(uint16_t)word(0x2e300+i*2);valid[16+i]=true;}
+    size_t base=0x32260;
+    p=base+word(base+word(base+stage*2)+2*2);
+    bool complete=false;
+    for(unsigned guard=0;guard<32 && range(p,3);++guard,p+=3) {
+      if(word(p)==65535) {complete=true;break;}
+      size_t source=0x28000+(word(p)&0x7fff);unsigned dest=rom[p+2];
+      if(dest+16>128 || !range(source,32)) return -1;
+      for(unsigned i=0;i<16;++i) {colors[dest+i]=(uint16_t)word(source+i*2);valid[dest+i]=true;}
+    }
+    if(!complete) return -1;
+    for(unsigned ty=0;ty<3;++ty) for(unsigned tx=0;tx<8;++tx) {
+      unsigned sx=96+tx*8,sy=ty*8;
+      size_t a=tables[0]+screen*128+(sy/32*8+sx/32)*2;
+      if(!range(a,2)) return -1;
+      a=tables[1]+word(a)*8+((sy/16%2)*2+sx/16%2)*2;
+      if(!range(a,2)) return -1;
+      a=tables[2]+word(a)*8+((sy/8%2)*2+sx/8%2)*2;
+      if(!range(a,2)) return -1;
+      unsigned tile=word(a),number=tile&1023;
+      if(number==7) continue; /* Native empty common tile; retain the arena underneath. */
+      if(number<16 || (number-16)*32+32>count) return -1;
+      const uint8_t *bits=chr+(number-16)*32;
+      for(unsigned py=0;py<8;++py) for(unsigned px=0;px<8;++px) {
+        unsigned row=(tile&0x8000)?7-py:py,shift=(tile&0x4000)?px:7-px;
+        unsigned pixel=((bits[row*2]>>shift)&1)|(((bits[row*2+1]>>shift)&1)<<1)|
+            (((bits[row*2+16]>>shift)&1)<<2)|(((bits[row*2+17]>>shift)&1)<<3);
+        unsigned index=(tile>>10&7)*16+pixel;
+        if(pixel && valid[index]) rush_ceiling[(ty*8+py)*64+tx*8+px]=
+            colors[index]|((tile&0x2000)?0x10000:0);
+      }
+    }
+  }
+  return rush_ceiling[y*64+x];
 }
 static bool tiles(unsigned id, uint8_t out[8192]) {
   uint8_t decoded[65536];
@@ -267,7 +386,7 @@ static const MmxSpriteAsset *MmxRenderAssetsCaptiveZero_unlocked(void) {
   }
   return NULL;
 }
-static bool palette(unsigned id, uint16_t out[16]) {
+static bool palette_bank(unsigned id, unsigned bank, uint16_t out[16]) {
   size_t p = 0x30000 + (word(0x30133 + id) & 0x7fff);
   bool found = false;
   memset(out, 0, 32);
@@ -276,7 +395,7 @@ static bool palette(unsigned id, uint16_t out[16]) {
     unsigned count = rom[p];
     if (!count) return found;
     size_t source = 0x28000 + (word(p + 1) & 0x7fff);
-    int first = (int)rom[p + 3] - 128;
+    int first = (int)rom[p + 3] - 128 - (int)bank*16;
     if (!range(source, count * 2)) return false;
     for (unsigned i = 0; i < count; ++i) if ((unsigned)(first + (int)i) < 16) {
       out[first + i] = (uint16_t)word(source + i * 2); found = true;
@@ -284,6 +403,7 @@ static bool palette(unsigned id, uint16_t out[16]) {
   }
   return false;
 }
+static bool palette(unsigned id, uint16_t out[16]) {return palette_bank(id,0,out);}
 static void stage_assets(unsigned stage, unsigned section) {
   if (stage == cached_stage && section == cached_section) return;
   cached_stage = stage; cached_section = section;
@@ -305,6 +425,7 @@ static void stage_assets(unsigned stage, unsigned section) {
       if (!pass && ready[id] == 3) continue;
       palettes[id] = pal;
       MmxSpriteAsset *a = &assets[id];
+      asset_palette[id]=(uint16_t)pal;
       a->id = (uint8_t)id; a->tile_base = (uint8_t)(word(p + 1) >> 4);
       a->attributes = (uint8_t)(0x20 | ((word(p + 1) >> 12) & 1) | (rom[p + 5] >> 3));
       a->current = pass == 1;
@@ -328,6 +449,103 @@ static const MmxSpriteAsset *MmxRenderAssetsSprite_unlocked(unsigned stage, unsi
   stage_assets(stage, section);
   unsigned id = sprite < 256 ? sprite_resource[sprite] : 255;
   return id < 254 && ready[id] == 1 ? &assets[id] : NULL;
+}
+static const MmxSpriteAsset *MmxRenderAssetsRushSprite_unlocked(unsigned stage,unsigned sprite) {
+  if(stage>=13 || sprite>=256 || !rom) return NULL;
+  if(!rush_ready[stage][sprite]) {
+    /* Prefer the boss-room section and keep stage-specific palettes separate.
+     * An unrelated stage sharing an animation number is not its resource. */
+    unsigned start=word(0x32cee + stage*2),end=word(0x32cee + stage*2+2);
+    if(end<start || end-start>128) return NULL;
+    for(unsigned section=(end-start)/2;section && !rush_ready[stage][sprite];) {
+      const MmxSpriteAsset *a=MmxRenderAssetsSprite(stage,--section,sprite);
+      /* Armadillo's native controller switches his roll to animation $63 and tile base
+       * $40. Its boss-room resource $5E is absent from the enemy animation
+       * table, which lists only the standing body's $62/$5D binding. */
+      if(!a && stage==3 && sprite==0x63 && ready[0x5e]==1) a=&assets[0x5e];
+      /* Octopus's $87:840C tornado uses animation $77 / resource $6B.
+       * Eagle's $87:DBCB dive switches to $8A and streams resource $83;
+       * both bindings are absent from the enemy animation table. */
+      if(!a && stage==1 && sprite==0x77 && ready[0x6b]==1) a=&assets[0x6b];
+      if(!a && stage==5 && sprite==0x8a && ready[0x83]==1) a=&assets[0x83];
+      /* Penguin's $81:BCED statues switch to the separate $62 ice sheet. */
+      if(!a && stage==8 && sprite==0x68 && ready[0x62]==1) a=&assets[0x62];
+      if(a) {
+        MmxSpriteAsset *copy=malloc(sizeof(*copy));if(!copy) return NULL;
+        *copy=*a;copy->current=copy->live_tiles=copy->live_colors=false;
+        rush_assets[stage][sprite]=copy;rush_palette[stage][sprite]=asset_palette[a->id];
+        rush_ready[stage][sprite]=1;
+      }
+    }
+    if(!rush_ready[stage][sprite]) rush_ready[stage][sprite]=2;
+  }
+  return rush_ready[stage][sprite]==1?rush_assets[stage][sprite]:NULL;
+}
+static const MmxSpriteAsset *MmxRenderAssetsRushObjectSprite_unlocked(const uint8_t ram[0x20000],
+    unsigned object,unsigned stage,unsigned sprite) {
+  const MmxSpriteAsset *base=MmxRenderAssetsRushSprite(stage,sprite);
+  if(!base || !ram || object<0xe68 || object>=0x1d08) return base;
+  /* $87:D8D9/$DE1F select Eagle's permanent page-one $89 body. $10/$31
+   * still describe his separate page-zero $8A stream: applying that DMA to
+   * the static body overwrites its wings. Octopus's tornado is static too;
+   * reused projectile slots can retain a previous actor's DMA metadata. */
+  unsigned table=ram_word(ram,object+0x31),pose=ram[object+0x17]&127;
+  bool streamed=table>=0x8000 && ram[object+0x10]==base->id;
+  unsigned kind=ram[object+10],palette_offset=0;
+  const MmxSpriteAsset *ice=NULL;
+  /* $87:89CA adds one palette for Eagle's egg/chick. Penguin's beads,
+   * breath and shatter helpers read $7F:8362 while still using sheet $61. */
+  if(stage==5 && sprite==0x8a && kind==0x24) palette_offset=1;
+  if(stage==8 && sprite==0x67 && (kind==6 || kind==8 || kind==0x1a)) {
+    ice=MmxRenderAssetsRushSprite(8,0x68);if(!ice) return base;
+  }
+  if(stage==6 && sprite==0x91) {
+    /* $88:8053 selects palette 6 for the electric orb. $88:9E7E ORs
+     * $06 onto Mandrill's palette-4 body (palette 7); $88:A25E selects
+     * palette 5 for the charged attack. All four live in list $01D2. */
+    unsigned bits=ram[object+17]&14;
+    palette_offset=kind==0x28?2:kind==0x31 && (bits==14 || bits==6)?3:
+        kind==0x31 && bits==10?1:0;
+  }
+  if(!streamed && !palette_offset && !ice) return base;
+  unsigned slot=(object-0xe68)/32;
+  uint64_t key=((uint64_t)(ice?8:palette_offset)<<40)|((uint64_t)stage<<32)|
+      ((uint32_t)table<<16)|(sprite<<8)|pose;
+  if(rush_pose_key[slot]==key && rush_pose[slot].id==base->id) return rush_pose+slot;
+  MmxSpriteAsset *art=rush_pose+slot;*art=*base;
+  if(ice) {
+    memcpy(art->colors,ice->colors,sizeof(art->colors));
+    art->attributes=(uint8_t)((art->attributes&~14u)|(ice->attributes&14));
+  } else if(palette_offset) {
+    if(!palette_bank(rush_palette[stage][sprite],palette_offset,art->colors)) return base;
+    art->attributes=(uint8_t)((art->attributes&~14u)|(((art->attributes&14)+palette_offset*2)&14));
+  }
+  if(!streamed) {rush_pose_key[slot]=key;return art;}
+  size_t count;const uint8_t *decoded=resource_data(base->id,&count);
+  if(!decoded) return base;
+  /* Native $84:8FCA remaps each pose's five-byte DMA list into its OBJ
+   * allocation. Read bank-$7F sources from this actor's decompressed resource,
+   * rather than the arena stage's unrelated shared WRAM staging buffer. */
+  size_t directory=lorom(0x850000|table);
+  size_t list=directory+word(directory+pose*2);
+  /* Empty pose records retain the previous upload in the native animation. */
+  while(pose && range(list,1) && !rom[list]) list=directory+word(directory+--pose*2);
+  for(unsigned n=0;n<32;++n,list+=5) {
+    if(!range(list,5)) return base;
+    unsigned length=rom[list]*16;if(!length) break;
+    unsigned source=word(list+1),bank=rom[list+3];
+    int destination=(rom[list+4]&127)*512-0xc000;
+    if(destination<0 || destination+(int)length>sizeof(art->tiles)) return base;
+    if(bank==0x7f) {
+      if(source+length>count) return base;
+      memcpy(art->tiles+destination,decoded+source,length);
+    } else {
+      size_t offset=lorom((bank<<16)|source);if(!range(offset,length)) return base;
+      memcpy(art->tiles+destination,rom+offset,length);
+    }
+    if(rom[list+4]&128) break;
+  }
+  rush_pose_key[slot]=key;return art;
 }
 static const MmxSpriteAsset *MmxRenderAssetsObjectSprite_unlocked(const uint8_t ram[0x20000],
                                                 unsigned object, unsigned animation) {
@@ -716,6 +934,30 @@ const MmxSpriteAsset *MmxRenderAssetsObjectSprite(const uint8_t ram[0x20000],
 bool MmxRenderAssetsRideArmorPalettePending(const uint8_t ram[0x20000], const uint16_t colors[16]) {
   assets_lock();
   bool result = MmxRenderAssetsRideArmorPalettePending_unlocked(ram, colors);
+  assets_unlock();
+  return result;
+}
+void MmxRenderAssetsPreloadRush(void) {
+  assets_lock();
+  MmxRenderAssetsPreloadRush_unlocked();
+  assets_unlock();
+}
+int MmxRenderAssetsRushCeilingPixel(unsigned x,unsigned y) {
+  assets_lock();
+  int result = MmxRenderAssetsRushCeilingPixel_unlocked(x, y);
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsRushSprite(unsigned stage,unsigned sprite) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsRushSprite_unlocked(stage, sprite);
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsRushObjectSprite(const uint8_t ram[0x20000],
+    unsigned object,unsigned stage,unsigned sprite) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsRushObjectSprite_unlocked(ram, object, stage, sprite);
   assets_unlock();
   return result;
 }

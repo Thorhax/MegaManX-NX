@@ -18,7 +18,7 @@ const RtlGameInfo kMmxGameInfo = {
 #else
   .title = "mmx",
 #endif
-  .initialize = NULL,
+  .initialize = &MmxReplayRomLoaded,
   .run_frame = &RunOneFrameOfGame,
   .draw_ppu_frame = &MmxDrawPpuFrame,
   .save_name_prefix = "save",

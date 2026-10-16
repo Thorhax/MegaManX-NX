@@ -1,0 +1,191 @@
+{
+  "source": "https://github.com/mstan/MegaManXSNESRecomp/issues/110#issuecomment-6202989597",
+  "archives": [
+    {
+      "comment_id": 6183473534,
+      "name": "p1 chill penguin bugs.zip",
+      "url": "https://github.com/user-attachments/files/33470210/p1.chill.penguin.bugs.zip",
+      "compressed_bytes": 8175853,
+      "expanded_bytes": 177207108,
+      "file_count": 37,
+      "sha256": "663e91bbb7f43cbebd454793797195d947e448ea850d379c39d1086dcdf821e4"
+    },
+    {
+      "comment_id": 6183473534,
+      "name": "p2 cam glitch.zip",
+      "url": "https://github.com/user-attachments/files/33470213/p2.cam.glitch.zip",
+      "compressed_bytes": 8163057,
+      "expanded_bytes": 177224069,
+      "file_count": 38,
+      "sha256": "830d38872eba1a8cd787ae2f71c7efaf540eb3c3081e4e03afc7ca464574f464"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 1 p1 chill penguin.zip",
+      "url": "https://github.com/user-attachments/files/33516601/session.1.p1.chill.penguin.zip",
+      "compressed_bytes": 12022385,
+      "expanded_bytes": 185008677,
+      "file_count": 162,
+      "sha256": "8e39f0fe1f2a731c049909218442c8aa964dc44eda5b9a7ee2433d2346d68c93"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 1 p2 chill penguin camera.zip",
+      "url": "https://github.com/user-attachments/files/33516602/session.1.p2.chill.penguin.camera.zip",
+      "compressed_bytes": 12015150,
+      "expanded_bytes": 185016358,
+      "file_count": 163,
+      "sha256": "1f98e0809514795897992c870b55951cf8d88022313c6067569df3dd08b100f3"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 2 p1 spark light bug part 1.zip",
+      "url": "https://github.com/user-attachments/files/33517434/session.2.p1.spark.light.bug.part.1.zip",
+      "compressed_bytes": 19213117,
+      "expanded_bytes": 260332702,
+      "file_count": 249,
+      "sha256": "148f02d35726f4b3f0e77ff70fdce0131e8d320507219299f2cf145d1f09968e"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 2 p1 spark light bug part 2.zip",
+      "url": "https://github.com/user-attachments/files/33517433/session.2.p1.spark.light.bug.part.2.zip",
+      "compressed_bytes": 22955369,
+      "expanded_bytes": 411073543,
+      "file_count": 242,
+      "sha256": "b97ec5efa71102d0506a98da79d8beb02b9ab9822f7f920daedf79fb166f953e"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 2 p2 cam glitch armadillo part 1.zip",
+      "url": "https://github.com/user-attachments/files/33517454/session.2.p2.cam.glitch.armadillo.part.1.zip",
+      "compressed_bytes": 19211621,
+      "expanded_bytes": 260356904,
+      "file_count": 250,
+      "sha256": "14900d4b3ce5008fe5b0e92e2e31ffca56d9a26d14af46012ab533a370422252"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 2 p2 cam glitch armadillo part 2.zip",
+      "url": "https://github.com/user-attachments/files/33517453/session.2.p2.cam.glitch.armadillo.part.2.zip",
+      "compressed_bytes": 22957834,
+      "expanded_bytes": 411083474,
+      "file_count": 242,
+      "sha256": "7ab5e4284b10a05c9f033970625443a5f7e52e5ad60b7c4807776330d456677e"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 3 p1 octopus invisible fish part 1.zip",
+      "url": "https://github.com/user-attachments/files/33517343/session.3.p1.octopus.invisible.fish.part.1.zip",
+      "compressed_bytes": 20604014,
+      "expanded_bytes": 350955680,
+      "file_count": 213,
+      "sha256": "f18dacaa49342b442bbbd69b71179ac18b9cb0ea3e9b2fff68a118ec3d8378bf"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 3 p1 octopus invisible fish part 2.zip",
+      "url": "https://github.com/user-attachments/files/33517342/session.3.p1.octopus.invisible.fish.part.2.zip",
+      "compressed_bytes": 15603399,
+      "expanded_bytes": 247634145,
+      "file_count": 190,
+      "sha256": "c30fa97548a50f714acc49b388b0eb610f2e8a64c808c00c0144f88388611df0"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 3 p2 octopus cam glitch part 1.zip",
+      "url": "https://github.com/user-attachments/files/33517357/session.3.p2.octopus.cam.glitch.part.1.zip",
+      "compressed_bytes": 20754939,
+      "expanded_bytes": 318309391,
+      "file_count": 213,
+      "sha256": "5f5a46fe77f9307a38f602b092963f6d4ed719bcff2d63b396bc6558a1959563"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 3 p2 octopus cam glitch part 2.zip",
+      "url": "https://github.com/user-attachments/files/33517358/session.3.p2.octopus.cam.glitch.part.2.zip",
+      "compressed_bytes": 15462096,
+      "expanded_bytes": 280272569,
+      "file_count": 191,
+      "sha256": "9dec10685cba280e690f3e2c089d62bd4c826028f0770fc1e35509d9e286ff1b"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 4 p1 bird crash.zip",
+      "url": "https://github.com/user-attachments/files/33517300/session.4.p1.bird.crash.zip",
+      "compressed_bytes": 19675537,
+      "expanded_bytes": 455615053,
+      "file_count": 180,
+      "sha256": "06320ce8bcc3c21c5c08adf10b3143b726a950a213998bbec904a6da25441f6b"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "Session 4 p2 eagle cam glitch and freeze.zip",
+      "url": "https://github.com/user-attachments/files/33517301/Session.4.p2.eagle.cam.glitch.and.freeze.zip",
+      "compressed_bytes": 19654937,
+      "expanded_bytes": 455622888,
+      "file_count": 181,
+      "sha256": "c4a7021dcc1516d6096b3cc6a85aa7e79a75ec8fa932fd13a971587e7b5402d2"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 5 p1 mammoth camera bug avoided part 1.zip",
+      "url": "https://github.com/user-attachments/files/33517499/session.5.p1.mammoth.camera.bug.avoided.part.1.zip",
+      "compressed_bytes": 25431074,
+      "expanded_bytes": 709774468,
+      "file_count": 110,
+      "sha256": "4de617377d9ac2183a0804909a859eadad1b916f88c2ea6d15caad6fed2fd1d2"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 5 p1 mammoth camera bug avoided part 2.zip",
+      "url": "https://github.com/user-attachments/files/33517500/session.5.p1.mammoth.camera.bug.avoided.part.2.zip",
+      "compressed_bytes": 24109149,
+      "expanded_bytes": 307451605,
+      "file_count": 362,
+      "sha256": "f732dea6800aff1e4fa15ca07e58277bfd80e8ded249c0d53ad73185d4e88a2b"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 5 p2 mammoth part 1.zip",
+      "url": "https://github.com/user-attachments/files/33517529/session.5.p2.mammoth.part.1.zip",
+      "compressed_bytes": 24095796,
+      "expanded_bytes": 307364874,
+      "file_count": 363,
+      "sha256": "cdb97e4a874ed1665458746304dfa2fef661eaea6f6a1a5977db27f99ed508d9"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 5 p2 mammoth part 2.zip",
+      "url": "https://github.com/user-attachments/files/33517528/session.5.p2.mammoth.part.2.zip",
+      "compressed_bytes": 25442660,
+      "expanded_bytes": 709775488,
+      "file_count": 110,
+      "sha256": "5f1d9a4dbe3772d102ecbde4f123e9d52fc6aac1e2d0c654419a443a23823e1b"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 6 p1 chameleon missing birds.zip",
+      "url": "https://github.com/user-attachments/files/33517039/session.6.p1.chameleon.missing.birds.zip",
+      "compressed_bytes": 20228903,
+      "expanded_bytes": 310092421,
+      "file_count": 270,
+      "sha256": "d2a8f83a5e45fa5539a186c6c8e2b5ac77065458d229867cea620c305be92af1"
+    },
+    {
+      "comment_id": 6202989597,
+      "name": "session 6 p2 chameleon no birds.zip",
+      "url": "https://github.com/user-attachments/files/33517040/session.6.p2.chameleon.no.birds.zip",
+      "compressed_bytes": 20224289,
+      "expanded_bytes": 310099530,
+      "file_count": 271,
+      "sha256": "a2af65efdb24629c0f57b566fc74a744a80b2802f878163bab7c651e108a868c"
+    }
+  ],
+  "total_archives": 20,
+  "total_files": 4037,
+  "compressed_bytes": 376001179,
+  "expanded_bytes": 6830270947,
+  "replay_sets": 762,
+  "csv_rows": 12866835
+}

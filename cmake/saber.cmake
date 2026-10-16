@@ -325,8 +325,12 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/mmx_weapons.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/mmx_weapon_combat.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/mmx_coop_view.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/mmx_boss_rush.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/mmx_boss_rush_draw.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/mmx_boss_rush_score.cpp"
         "${_saber_assets_source}"
         "${SNESRECOMP_ROOT}/runner/src/sha256.c")
+    target_compile_features(mmx_saber_renderer_draw_test PRIVATE cxx_std_17)
     target_include_directories(mmx_saber_renderer_draw_test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/saber"

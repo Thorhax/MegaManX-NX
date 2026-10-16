@@ -15,7 +15,7 @@ def check_saber(args, work, env):
     folder.mkdir()
     shutil.copytree(game.parent / "mods/preloaded/packages", folder / "mods/preloaded/packages")
     (folder / "config.ini").write_text(
-        "[General]\nAutosave=0\nDisableFrameDelay=1\nSkipLauncher=1\n"
+        "[General]\nAutosave=0\nDisableFrameDelay=0\nSkipLauncher=1\n"
         "[Graphics]\nOutputMethod=SDL-Software\nWidescreen=0\nNewRenderer=1\n"
         "NoSpriteLimits=1\n[Sound]\nEnableAudio=0\n")
     (folder / "mods/preloaded/state.toml").write_text(
@@ -33,11 +33,14 @@ def check_saber(args, work, env):
     current.pop("MMX_REPLAY_RECORD", None)  # Exercise the player default.
     with (folder / "record.log").open("wb") as log:
         result = subprocess.run([str(game), "--rom", str(rom), "--config", str(folder / "config.ini"),
-                                 "--no-launcher", "--script", str(folder / "route.script"),
-                                 "--benchmark", "3300"], cwd=folder, env=current,
+                                 "--no-launcher", "--script", str(folder / "route.script")], cwd=folder, env=current,
                                 stdout=log, stderr=subprocess.STDOUT, timeout=120)
     assert result.returncode == 0, (folder / "record.log").read_text(errors="replace")[-4000:]
+    assert "SEH CRASH" not in (folder / "record.log").read_text(errors="replace"), \
+        "SDL worker threads must be joined before host shutdown"
     capture = sorted(folder.glob("*.replay"))[-1]
+    identities = {p.read_text().splitlines()[2] for p in folder.glob("*.replay")}
+    assert len(identities) == 1, "source-ROM identity stays stable across character/collision changes"
     assert int(capture.read_text().splitlines()[3].split()[1]) & 32, "Saber must actually activate"
     sidecar = Path(str(capture) + ".mods.toml")
     sidecar.write_text(sidecar.read_text().replace('behavior = "saber"', 'behavior = "x3"')
@@ -66,6 +69,7 @@ def main():
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=False)
     env = os.environ.copy()
+    env.update(SDL_AUDIODRIVER="dummy", SDL_VIDEODRIVER="dummy")
     for key in tuple(env):
         if key.startswith(("MMX_", "SNESRECOMP_RUN", "SNES_NET_")):
             del env[key]
@@ -95,10 +99,30 @@ def main():
         assert sum(line.startswith("S ") for line in capture.read_text().splitlines()) == 3, \
             "capture needs initial, backward rollback and same-frame restore checkpoints"
         run(f"fresh-{mode}", settings | {"MMX_REPLAY_INPUT": str(capture)}, contains="90 executions")
+        if mode == "online":
+            damaged = work / "bad-view-history.replay"
+            lines = capture.read_text().splitlines()
+            i = next(i for i, line in enumerate(lines) if line.startswith("H "))
+            fields = lines[i].split()
+            fields[4] = f"{int(fields[4], 16)^1:08x}"
+            lines[i] = " ".join(fields)
+            damaged.write_text("\n".join(lines) + "\n")
+            shutil.copy2(str(capture) + ".sav", str(damaged) + ".sav")
+            run("bad-view-history", settings | {"MMX_REPLAY_INPUT": str(damaged)},
+                good=False, contains="FIRST DIVERGENCE")
         if mode != "solo":
             continue
         original = capture.read_text()
-        for label in ("truncated", "bad-hash", "bad-checkpoint", "wrong-rom", "empty"):
+        assert original.startswith("MMXREPLAY 3\n"), "new recordings include independent camera history"
+        legacy = work / "legacy.replay"
+        legacy.write_text(original.replace("MMXREPLAY 3\n", "MMXREPLAY 1\n", 1))
+        shutil.copy2(str(capture) + ".sav", str(legacy) + ".sav")
+        run("legacy", settings | {"MMX_REPLAY_INPUT": str(legacy)}, contains="90 executions")
+        legacy_v2 = work / "legacy-v2.replay"
+        legacy_v2.write_text(original.replace("MMXREPLAY 3\n", "MMXREPLAY 2\n", 1))
+        shutil.copy2(str(capture) + ".sav", str(legacy_v2) + ".sav")
+        run("legacy-v2", settings | {"MMX_REPLAY_INPUT": str(legacy_v2)}, contains="90 executions")
+        for label in ("truncated", "bad-hash", "bad-checkpoint", "wrong-rom", "legacy-wrong-rom", "empty"):
             damaged = work / (label + ".replay")
             text = original
             if label == "truncated":
@@ -110,9 +134,11 @@ def main():
                 fields[2] = f"{int(fields[2],16)^1:08x}"
                 lines[i] = " ".join(fields)
                 text = "\n".join(lines) + "\n"
-            elif label == "wrong-rom":
+            elif label in ("wrong-rom", "legacy-wrong-rom"):
                 lines = text.splitlines()
                 lines[2] = "ROM 00000000"
+                if label == "legacy-wrong-rom":
+                    lines[0] = "MMXREPLAY 1"
                 text = "\n".join(lines) + "\n"
             elif label == "empty":
                 text = "\n".join(text.splitlines()[:4]) + "\n"
@@ -137,10 +163,18 @@ def main():
         print("PASS desktop helper", flush=True)
     folder = run("rotation", {"MMX_REPLAY_TEST": "solo", "MMX_REPLAY_ROTATE": "1"})
     captures = sorted(folder.glob("*.replay"))
-    assert len(captures) == 6, "only the six newest segments should remain"
-    assert len(list(folder.glob("*.replay.sav"))) == 6, "old checkpoint sidecars should rotate too"
+    assert len(captures) == 8, "the beginning of a longer session must survive the old one-minute cutoff"
+    assert len(list(folder.glob("*.replay.sav"))) == 8, "every retained segment needs its checkpoint"
     for i, capture in enumerate(captures):
         run(f"rotated-{i}", {"MMX_REPLAY_TEST": "solo", "MMX_REPLAY_INPUT": str(capture)})
+    bounded = run("bounded-history", {"MMX_REPLAY_TEST": "solo", "MMX_REPLAY_ROTATE": "1",
+                                      "MMX_REPLAY_HISTORY_MIB": "2"})
+    retained = sorted(bounded.glob("*.replay"))
+    assert 0 < len(retained) < 8, "checkpoint byte budget must evict whole old segments"
+    assert sum(p.stat().st_size for p in bounded.glob("*.replay.sav")) <= 2 * 1024 * 1024
+    assert len(retained) == len(list(bounded.glob("*.replay.sav")))
+    for i, capture in enumerate(retained):
+        run(f"bounded-{i}", {"MMX_REPLAY_TEST": "solo", "MMX_REPLAY_INPUT": str(capture)})
     if args.fixture:
         run("armor", {"MMX_REPLAY_TEST": "armor", "MMX_REPLAY_FIXTURE": str(args.fixture.resolve())})
         settings = {"MMX_REPLAY_TEST": "zero", "MMX_REPLAY_FIXTURE": str(args.fixture.resolve())}

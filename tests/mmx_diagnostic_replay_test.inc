@@ -73,6 +73,9 @@ static void diagnostic_replay_checks(const char *assets, const char *mode) {
     if(t==60) diagnostic_restore_current_frame();
     frame((t<30?SNES_PAD_RIGHT:t<60?SNES_PAD_B:SNES_PAD_Y) |
           ((t<40?SNES_PAD_LEFT:SNES_PAD_Y|SNES_PAD_B)<<12));
+    /* Capture at the player's rate. Unlimited headless boot can outrun any
+     * bounded writer; saturation is covered by the blocked-worker unit test. */
+    SDL_Delay(16);
   }
   char captured[1400]; snprintf(captured,sizeof(captured),"%s",MmxReplayPath());
   check(!MmxReplayFailed() && captured[0],"diagnostic capture was written");
@@ -91,9 +94,14 @@ static void diagnostic_replay_checks(const char *assets, const char *mode) {
       "recording leaves the complete machine identical to an unrecorded run");
   free(observed);free(plain);free(rollback);
   check(MmxReplayPlayback(captured),"diagnostic capture opens for playback");
+  /* Retention can start a segment early at a rollback/checkpoint byte limit. */
+  FILE *capture_file=fopen(captured,"r");check(capture_file!=NULL,"capture drained before local playback");
+  char capture_line[512];unsigned expected_frames=0;
+  while(fgets(capture_line,sizeof(capture_line),capture_file))if(capture_line[0]=='H')++expected_frames;
+  fclose(capture_file);
   unsigned frames=0;
   while(!MmxReplayFinished() && !MmxReplayFailed() && frames<601) { frame(0); ++frames; }
-  check(!MmxReplayFailed() && MmxReplayFinished() && frames==(executions-1)%600+1,
+  check(!MmxReplayFailed() && MmxReplayFinished() && expected_frames && frames==expected_frames,
       "recorded state, both inputs, and every WRAM/co-op/view checkpoint replay exactly");
   puts("MMX DIAGNOSTIC REPLAY CHECKS PASSED");
 }

@@ -1,10 +1,70 @@
 /* Real catalog + launcher policy checks, using a caller-owned scratch root. */
 #include "mmx_password_save.h"
+#include "mmx_boss_rush.h"
+
+static void boss_rush_policy_checks(const RecompLauncherCModProvider *p, const char *rom) {
+  const char *rush="megaman-x.mode.boss-rush";
+  RecompLauncherCModFeature feature={0};
+  int visible=0;
+  for(int i=0;i<p->feature_count(p->ctx);++i) {
+    if(p->feature_get(p->ctx,i,&feature) && !strcmp(feature.package_id,rush))
+      visible=!feature.hidden;
+  }
+  check(visible,"Boss Rush is exposed in the netplay mod list");
+  check(p->commit_netplay(p->ctx,rom),"default Boss Rush match plan commits");
+  snes_mod_runtime_activate_plugins_c();
+  check(MmxBossRushEnabled(),"default Boss Rush plan activates its controller");
+
+  static uint8_t title_ram[0x20000];
+  memset(title_ram,0,sizeof(title_ram));
+  title_ram[0xba9]=2;title_ram[0xbad]=32;title_ram[0xbb0]=198;
+  MmxBossRushReset();
+  MmxBossRushFrame(title_ram,0);MmxBossRushFrame(title_ram,SNES_PAD_DOWN);
+  check(MmxBossRushGetState().selection==3 && title_ram[0xbb0]==214,
+      "enabled lobby plan exposes the fourth title choice");
+  check(p->feature_enable(p->ctx,rush,"boss_rush",0) && p->commit_netplay(p->ctx,rom),
+      "host can disable Boss Rush before the match");
+  snes_mod_runtime_activate_plugins_c();
+  MmxBossRushFrame(title_ram,0);
+  check(!MmxBossRushEnabled() && !MmxBossRushGetState().menu &&
+      title_ram[0xbb0]==198 && title_ram[0x3c]==2,
+      "disabling the selected fourth row restores the native Option cursor");
+  MmxBossRushFrame(title_ram,SNES_PAD_DOWN);MmxBossRushFrame(title_ram,0);
+  MmxBossRushFrame(title_ram,SNES_PAD_START);
+  check(MmxBossRushGetState().mode==MMX_RUSH_OFF && !MmxBossRushGetState().menu,
+      "disabled Boss Rush cannot start through title inputs");
+
+  char disabled[2048],enabled[2048],reason[256];
+  snes_mod_runtime_effective_set_c(disabled,sizeof(disabled));
+  check(!strstr(disabled,rush),"disabled Boss Rush is absent from the agreed mod set");
+  check(p->feature_enable(p->ctx,rush,"boss_rush",1) && p->commit_netplay(p->ctx,rom),
+      "host can enable Boss Rush for the room");
+  snes_mod_runtime_effective_set_c(enabled,sizeof(enabled));
+  check(strstr(enabled,"megaman-x.mode.boss-rush@1.0.0/boss_rush")!=NULL,
+      "Boss Rush is part of the simulation mod agreement");
+  check(snes_mod_runtime_adopt_set_c(disabled,reason,sizeof(reason))==SNES_MODSET_OK &&
+      p->commit_netplay(p->ctx,rom),"peer adopts the host's disabled Boss Rush plan");
+  snes_mod_runtime_activate_plugins_c();
+  check(!MmxBossRushEnabled(),"host opt-out overrides the peer's default-on feature");
+  check(snes_mod_runtime_adopt_set_c(enabled,reason,sizeof(reason))==SNES_MODSET_OK &&
+      p->commit_netplay(p->ctx,rom),"peer adopts the host's enabled Boss Rush plan");
+  snes_mod_runtime_activate_plugins_c();
+  check(MmxBossRushEnabled(),"adopted Boss Rush feature activates on the peer");
+  MmxBossRushReset();title_ram[0xbb0]=198;
+  MmxBossRushFrame(title_ram,0);MmxBossRushFrame(title_ram,SNES_PAD_DOWN);
+  MmxBossRushFrame(title_ram,0);MmxBossRushFrame(title_ram,SNES_PAD_START);
+  check(MmxBossRushGetState().mode==MMX_RUSH_LOADING && MmxBossRushGetState().coop,
+      "online title confirmation starts Boss Rush with the agreed co-op mode");
+  MmxBossRushReset();
+}
+
 static void netplay_policy_checks(const char *root, const char *rom, const char *x3) {
   const char *digest = "b8f70a6e7fb93819f79693578887e2c11e196bdf1ac6ddc7cb924b1ad0be2d32";
   const char *coop = "megaman-x.coop", *zero = "megaman-x.character.zero";
   const char *wide = "megaman-x.enhancement.widescreen";
   check(x3 && snes_mod_runtime_initialize_c(root, "megaman-x-us", digest), "netplay private catalog initializes");
+  check(snes_mod_runtime_feature_enabled_c("megaman-x.mode.boss-rush","boss_rush"),
+      "Boss Rush defaults on in a fresh mod catalog");
   const RecompLauncherCModProvider *base = snes_mod_runtime_launcher_provider_c();
   check(base->feature_resource_set_path(base->ctx, coop, "coop", "x3-rom", x3), "local X3 source selected");
   base->feature_enable(base->ctx, coop, "coop", 0);
@@ -20,7 +80,10 @@ static void netplay_policy_checks(const char *root, const char *rom, const char 
   MmxNetplayConfigureLauncher(&gi);
   const RecompLauncherCModProvider *linked = gi.mods;
   RecompLauncherCModOption camera_option = {0};
-  check(!linked->feature_option_get(linked->ctx,coop,"coop",2,&camera_option) &&
+  int offline_camera=0;
+  for(int i=0;linked->feature_option_get(linked->ctx,coop,"coop",i,&camera_option);++i)
+    offline_camera|=!strcmp(camera_option.id,"cameras");
+  check(!offline_camera &&
       !linked->feature_set_option(linked->ctx,coop,"coop","cameras","independent"),
       "camera selection is unavailable offline");
   MmxCoopViewsSetIndependent(true); MmxBeforeFrame();
@@ -59,6 +122,7 @@ static void netplay_policy_checks(const char *root, const char *rom, const char 
   check(!strcmp(behavior,"x3"),"Add Zero shares the co-op selection");
   check(p->feature_set_option(p->ctx,coop,"coop","behavior","modern"),"host chooses Modern for match");
   check(p->feature_set_option(p->ctx, coop, "coop", "player1", "zero"), "host chooses the P1 character");
+  boss_rush_policy_checks(p,rom);
   const char *ratios[] = {"16:9", "21:9", "32:9"};
   for (int ratio = 0; ratio < 3; ++ratio) {
     check(p->feature_set_option(p->ctx, wide, "widescreen", "aspect", ratios[ratio]) &&
@@ -116,6 +180,9 @@ static void netplay_policy_checks(const char *root, const char *rom, const char 
   check(snes_mod_runtime_initialize_c(root, "megaman-x-us", digest), "reload persisted offline plan");
   snes_mod_runtime_effective_set_c(after, sizeof(after));
   check(!strcmp(offline, after), "netplay commits never overwrite the offline plan on disk");
+  check(base->commit(base->ctx,rom),"restored offline plan commits for launch");
+  snes_mod_runtime_activate_plugins_c();
+  check(MmxBossRushEnabled(),"offline default-on Boss Rush survives lobby edits and relaunch");
   puts("MMX NETPLAY POLICY CHECKS PASSED");
 }
 

@@ -1,5 +1,50 @@
 /* Optional regressions using private copies of the owner's three Eagle saves.
  * Fixtures/ROMs are never distributed or written back to the owner install. */
+static void coop_replay_start(const char *assets);
+/* Issue110 session4: a nearest-player update handed the lift to P2, then
+ * restored P1 while its teleport was active. The next frame captured the
+ * projected copy over its new teleport tick, freezing the whole scene. */
+static void coop_eagle_replay_checks(const char *assets,const char *fixture,
+    uint8_t *start,uint8_t *expected,uint8_t *actual,size_t cap) {
+  coop_replay_start(assets);RtlEnableExtendedFrameTiming();
+  g_config.no_sprite_limits=true;MmxCoopViewsSetIndependent(true);
+  for(unsigned driver=0;driver<2;++driver) {
+    check(RtlLoadSnapshot(fixture),"captured issue110 lift checkpoint loads");
+    MmxCoopState s=MmxCoopGetState();
+    check(s.scene_owner==2 && s.scene_phase==1 && !s.current && s.anchor==1,
+        "recording contains the wrong projected seat during P2's scene");
+    if(!driver) {
+      MmxCoopPlayer p=s.players[0];s.players[0]=s.players[1];s.players[1]=p;
+      s.current^=1;s.anchor^=1;s.scene_owner=1;MmxCoopSetState(&s);
+    }
+    unsigned hp[2]={s.players[0].body[0x27]&127,s.players[1].body[0x27]&127};
+    coop_frames(1,0,0);s=MmxCoopGetState();
+    check(s.current==s.anchor,"scene projects its owner before teleport can early-return");
+    bool hidden=false,returned=false,boss=false;
+    for(unsigned t=0;t<950;++t) {
+      coop_frames(1,0,0);s=MmxCoopGetState();
+      hidden|=s.scene_phase==2;
+      returned|=hidden && !s.scene_owner;
+      for(unsigned d=0xe68;d<0x1228;d+=64)
+        boss|=g_ram[d] && g_ram[d+10]==0x52 && g_ram[d+1]==4;
+      if(t==60) {
+        size_t n=RtlSaveSnapshotToMemory(start,cap);check(n,"lift handoff snapshot saves");
+        coop_frames(12,0,0);size_t en=RtlSaveSnapshotToMemory(expected,cap);
+        check(RtlLoadSnapshotFromMemory(start,n),"lift handoff snapshot restores");
+        coop_frames(12,0,0);
+        same(expected,en,actual,RtlSaveSnapshotToMemory(actual,cap),"lift transport replays byte-exactly");
+      }
+      if(returned && boss) break;
+    }
+    fprintf(stderr,"issue110 lift driver=%u anchor=%u current=%u scene=%u:%u hidden=%u returned=%u boss=%u\n",
+        driver,s.anchor,s.current,s.scene_owner,s.scene_phase,hidden,returned,boss);
+    check(hidden && returned && boss && s.anchor==driver,
+        "either captured rider completes the native ascent and returns its partner for Eagle");
+    check((s.players[0].body[0x27]&127)==hp[0] && (s.players[1].body[0x27]&127)==hp[1],
+        "lift scene preserves both players' health");
+  }
+  puts("MMX ISSUE110 EAGLE REPLAY CHECKS PASSED");
+}
 static unsigned eagle_word(const uint8_t *p) {return p[0]|p[1]<<8;}
 static void eagle_putword(uint8_t *p,unsigned n) {p[0]=(uint8_t)n;p[1]=(uint8_t)(n>>8);}
 static void eagle_fixture(const char *directory,unsigned slot,unsigned driver) {

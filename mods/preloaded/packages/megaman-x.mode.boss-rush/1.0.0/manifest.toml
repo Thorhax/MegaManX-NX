@@ -1,0 +1,24 @@
+format_version = 1
+id = "megaman-x.mode.boss-rush"
+version = "1.0.0"
+name = "Mega Man X Boss Rush"
+author = "mstan"
+description = "Endless fights against two different Mavericks at once."
+license = "PolyForm-Noncommercial-1.0.0"
+resolver = "declarative"
+save_compatibility = "requires-same-mods"
+
+[[target]]
+game_id = "megaman-x-us"
+rom_sha256 = "b8f70a6e7fb93819f79693578887e2c11e196bdf1ac6ddc7cb924b1ad0be2d32"
+
+[[feature]]
+id = "boss_rush"
+name = "Boss Rush"
+description = "Adds Boss Rush to the game's title menu for solo or co-op. A run ends when the last player dies."
+group = "Game Modes"
+default_enabled = true
+
+[[plugin]]
+feature = "boss_rush"
+id = "megaman-x.boss-rush"

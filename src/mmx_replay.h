@@ -3,10 +3,13 @@
 #include <stdint.h>
 
 /* Bounded, frame-boundary diagnostic recording, shared by desktop and tests. */
+void MmxReplayRomLoaded(void);
 void MmxReplayEnable(bool enabled);
 void MmxReplaySetConfigPath(const char *path);
 void MmxReplayStateLoaded(void);
 void MmxReplayClose(void);
+/* Drain and join background recording before the host calls SDL_Quit. */
+void MmxReplayShutdown(void);
 const char *MmxReplayPath(void);
 bool MmxReplayBegin(uint32_t *inputs);
 void MmxReplayEnd(void);

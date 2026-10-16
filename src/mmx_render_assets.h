@@ -11,7 +11,15 @@ typedef struct MmxSpriteAsset {
 } MmxSpriteAsset;
 
 void MmxRenderAssetsSetRom(const uint8_t *rom, size_t size);
+void MmxRenderAssetsPreloadRush(void);
+/* Penguin's original 64x24 ceiling mount, decoded from his room's BG1.
+ * -1 is transparent; bit 16 retains native BG priority, low 15 bits BGR555. */
+int MmxRenderAssetsRushCeilingPixel(unsigned x,unsigned y);
 const MmxSpriteAsset *MmxRenderAssetsSprite(unsigned stage, unsigned section, unsigned sprite);
+/* Private residency for cross-stage boss/child actors in the rush arena. */
+const MmxSpriteAsset *MmxRenderAssetsRushSprite(unsigned stage,unsigned sprite);
+const MmxSpriteAsset *MmxRenderAssetsRushObjectSprite(const uint8_t ram[0x20000],
+    unsigned object,unsigned stage,unsigned sprite);
 const MmxSpriteAsset *MmxRenderAssetsCaptiveZero(void);
 /* Original X1 body/beam CHR and blue palette, decoded without touching VRAM. */
 const MmxSpriteAsset *MmxRenderAssetsTeleportX(unsigned pose);

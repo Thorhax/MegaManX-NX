@@ -70,3 +70,5 @@ unsigned MmxSaberWaveRuntimeHitbox(const uint8_t *ram, unsigned enemy,
 void MmxSaberWaveRuntimeSetCollisionRecord(const uint8_t *record,
                                             size_t size);
 void MmxSaberWaveRuntimeCollisionRom(uint8_t *rom, size_t size);
+/* Immutable active source record, for validating legacy diagnostic identities. */
+bool MmxSaberWaveRuntimeGetCollisionRecord(uint8_t out[MMX_SABER_WAVE_COLLISION_RECORD_BYTES]);
