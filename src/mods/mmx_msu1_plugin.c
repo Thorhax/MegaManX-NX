@@ -117,7 +117,10 @@ static int mmx_msu1_apu_write(uint16_t reg, uint8_t value) {
    */
   switch (value) {
     case 0xf5:
-      if (!(msu1_read(0x2000) & MSU_STATUS_PLAY))
+      /* A capsule's $F6 fade finishes by stopping playback. The selected
+       * track and cursor still exist: $F5 resumes them even with PLAY clear.
+       * A missing PCM must continue to use the original SPC protocol. */
+      if (msu1_read(0x2000) & MSU_STATUS_ERROR)
         return 0;
       msu1_write(0x2007, MSU_CONTROL_PLAY | MSU_CONTROL_REPEAT);
       g_mmx_msu1_fade_state = kFadeIn;

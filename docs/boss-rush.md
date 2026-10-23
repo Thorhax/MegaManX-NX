@@ -246,6 +246,12 @@ set `MMX_BOSS_RUSH_TEST=1` and pass the verified USA ROM to run the title-menu,
 28-pair entrance, replacement, 600-frame combat and snapshot-replay checks in
 an empty private working directory. Add `MMX_BOSS_RUSH_COOP=<private Zero asset
 file>` to run those checks in local co-op, including one-player and team deaths.
+`MMX_BOSS_RUSH_REPORT_TEST=1` checks issue #124: native death updates in both
+boss slots without permanent player protection, the retail subtank refill cap
+and empty-tank menu navigation, Penguin's native ice lock, and prolonged
+Kuwanger combat at both room edges. It also resumes an unreachable destination
+from behind a closed door. CTest registers this fixture when the ROM and state
+test target are available.
 `MMX_BOSS_RUSH_MENU_TEST=1` selects a shorter regression that checks Up, Down
 and Select from every title row, then returns through the full logo opening and
 verifies its music bank against the original ROM's title command.

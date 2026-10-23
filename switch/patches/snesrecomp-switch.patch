@@ -76,7 +76,7 @@ index d1f6893..65d426b 100644
  #include <pthread.h>
  #include <stdlib.h>
 diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
-index 3bc3905..85691e6 100644
+index 3bc3905..af670da 100644
 --- a/runner/src/desktop/host_main.c
 +++ b/runner/src/desktop/host_main.c
 @@ -21,6 +21,9 @@
@@ -89,7 +89,15 @@ index 3bc3905..85691e6 100644
  #ifdef _WIN32
  #include <windows.h>
  #include <direct.h>
-@@ -164,7 +167,7 @@ static void HandleInput(int keyCode, int keyMod, bool pressed);
+@@ -72,6 +75,7 @@
+ #include "post_mortem.h"
+ #include "widescreen.h"
+ #include "snes_savestate_menu.h"
++#include "snes_game_overlay.h"
+ #include "snes_rewind.h"
+ #include "snes_overlay_draw.h"
+ #include "snes_osd.h"
+@@ -164,7 +168,7 @@ static void HandleInput(int keyCode, int keyMod, bool pressed);
  static void HandleCommand(uint32 j, bool pressed);
  static void PollKeyboardControls(const uint8_t *keys);
  static void RequestScreenshot(void);
@@ -98,7 +106,7 @@ index 3bc3905..85691e6 100644
  void OpenGLRenderer_Create(struct RendererFuncs *funcs);
  #include "opengl.h"   /* snesrecomp_opengl_set_vsync */
  #endif
-@@ -512,7 +515,7 @@ static void RendererEnumerate(void) {
+@@ -512,7 +516,7 @@ static void RendererEnumerate(void) {
    snprintf(g_renderer_id[0], kRendererNameMax, "auto");
    snprintf(g_renderer_label[0], kRendererNameMax, "Auto");
    g_renderer_count = 1;
@@ -107,7 +115,7 @@ index 3bc3905..85691e6 100644
    snprintf(g_renderer_id[1], kRendererNameMax, "opengl");
    snprintf(g_renderer_label[1], kRendererNameMax, "OpenGL");
    g_renderer_count = 2;
-@@ -1188,7 +1191,9 @@ static int ComposeStateThumbnail(uint32_t *dst, size_t cap, int *w, int *h) {
+@@ -1188,7 +1192,9 @@ static int ComposeStateThumbnail(uint32_t *dst, size_t cap, int *w, int *h) {
  
  /* Snapshots and their thumbnails share the same completed raster boundary. */
  static void NoteStateFrame(void) {
@@ -118,7 +126,67 @@ index 3bc3905..85691e6 100644
      int width = g_game->native_widescreen ? g_snes_width : 256;
      snes_savestate_menu_note_frame((const uint32_t *)g_ppu->renderBuffer, width, g_snes_height);
      snes_rewind_note_framebuffer((const uint32_t *)g_ppu->renderBuffer, width, g_snes_height);
-@@ -2046,9 +2051,16 @@ static _Thread_local unsigned g_apu_lock_depth;
+@@ -1649,6 +1655,14 @@ typedef struct PadGesture {
+ } PadGesture;
+ static PadGesture g_rewind_gesture;
+ static PadGesture g_launcher_gesture;
++static PadGesture g_game_overlay_gesture;
++static const SnesGameOverlay *g_game_overlay;
++void snes_game_overlay_register(const SnesGameOverlay *overlay) {
++  g_game_overlay = overlay;
++}
++static int GameOverlayOpen(void) {
++  return g_game_overlay && g_game_overlay->is_open && g_game_overlay->is_open();
++}
+ 
+ /* Lower-cased `spec` into bits; returns the number of buttons, or -1 when a
+  * name is not a button. */
+@@ -1851,7 +1865,9 @@ static void OverlaySelftestPadTick(unsigned pump) {
+ static void PresentFrozenWithOverlay(void) {
+   const uint32_t *panel = NULL;
+   int pw = 0, ph = 0;
+-  int is_menu = snes_savestate_menu_overlay_image(&panel, &pw, &ph) && panel;
++  int is_menu = GameOverlayOpen()
++      ? g_game_overlay->overlay_image && g_game_overlay->overlay_image(&panel, &pw, &ph) && panel
++      : snes_savestate_menu_overlay_image(&panel, &pw, &ph) && panel;
+   if (!is_menu && !(snes_rewind_overlay_image(&panel, &pw, &ph) && panel))
+     panel = NULL;
+ 
+@@ -1963,6 +1979,33 @@ static void RunSavestateMenuLoop(bool *running) {
+                          frames);
+ }
+ 
++/* The game overlay's modal pump: the save-state browser's, for a panel the
++ * game owns (snes_game_overlay.h). The guest stays frozen throughout. */
++static void GameOverlayKeyDown(int key, int repeat) {
++  if (g_game_overlay->handle_key) g_game_overlay->handle_key(key, repeat);
++}
++static void RunGameOverlayLoop(bool *running) {
++  unsigned frames = 0;
++  host_report_breadcrumb("game overlay OPEN - guest frozen until it closes");
++  g_overlay_modal = true;
++  SetAudioPaused(true);
++  while (GameOverlayOpen() && *running) {
++    PumpOverlayEvents(running, &GameOverlayKeyDown);
++    if (!*running && g_game_overlay->close)
++      g_game_overlay->close();
++    if (g_game_overlay->poll_nav)
++      g_game_overlay->poll_nav(OverlayNavInputs(), SDL_GetTicks());
++    PresentFrozenWithOverlay();
++    SDL_Delay(8);
++    frames++;
++  }
++  g_overlay_modal = false;
++  ResetAudioTimeline();
++  SetAudioPaused(g_paused);
++  OverlayNoteClosed();
++  host_report_breadcrumb("game overlay CLOSED after %u pumps - guest resuming", frames);
++}
++
+ static void RewindKeyDown(int key, int repeat) {
+   (void)repeat;
+   switch (key) {
+@@ -2046,9 +2089,16 @@ static _Thread_local unsigned g_apu_lock_depth;
  static _Thread_local bool g_audio_consumer_stalled;
  static _Thread_local uint64_t g_audio_stalled_callback;
  static uint64_t g_audio_callback_count;  /* protected by g_audio_mutex */
@@ -136,7 +204,7 @@ index 3bc3905..85691e6 100644
  #if SNESRECOMP_SDL3
  /* SDL3 replaced the pull callback with an SDL_AudioStream the app pushes into,
   * so the mixer needs a scratch buffer sized to whatever the stream asks for. */
-@@ -2087,6 +2099,7 @@ void RtlApuUnlock(void) {
+@@ -2087,6 +2137,7 @@ void RtlApuUnlock(void) {
       * Let the device drain it before the bounded ring overflows. Always
       * release the mutex while waiting, and stop waiting if the device stalls. */
      double limit = MonotonicSeconds() + 0.25;
@@ -144,7 +212,7 @@ index 3bc3905..85691e6 100644
      while (dsp_available(g_snes->apu->dsp) > HOST_AUDIO_HIGH_WATER) {
        SDL_UnlockMutex(g_audio_mutex);
        SDL_Delay(1);
-@@ -2100,6 +2113,7 @@ void RtlApuUnlock(void) {
+@@ -2100,6 +2151,7 @@ void RtlApuUnlock(void) {
          break;
        }
      }
@@ -152,7 +220,7 @@ index 3bc3905..85691e6 100644
    }
    SDL_UnlockMutex(g_audio_mutex);
  }
-@@ -2559,6 +2573,128 @@ static int FindRomBesideExe(char *out, size_t cap) {
+@@ -2559,6 +2611,128 @@ static int FindRomBesideExe(char *out, size_t cap) {
    return 0;
  }
  
@@ -281,7 +349,7 @@ index 3bc3905..85691e6 100644
  /* ── main ─────────────────────────────────────────────────────────────────── */
  
  /* ── The launcher, before boot and mid-game ──────────────────────────────── */
-@@ -2718,10 +2854,16 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
+@@ -2718,10 +2892,16 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
     * row that does nothing is worse than no row. */
  #if defined(SNESRECOMP_HOST_HAS_BLEND)
    gi->has_frame_blend  = 1;
@@ -299,7 +367,7 @@ index 3bc3905..85691e6 100644
    if (game->aspect_labels && game->num_aspect_labels > 0) {
      /* A port that rasterizes its own field owns the choices and the
       * meaning of the index; this host only carries them to the row. */
-@@ -2737,7 +2879,11 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
+@@ -2737,7 +2917,11 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
    gi->has_rewind_depth = game->rewind_settings ? 1 : 0;
    gi->has_run_ahead    = 1;   /* the runtime snapshots a machine in a frame */
    gi->has_vsync        = 1;
@@ -311,7 +379,7 @@ index 3bc3905..85691e6 100644
    RendererEnumerate();
    gi->renderer_labels  = g_renderer_label_ptr;
    gi->num_renderers    = g_renderer_count;
-@@ -2856,7 +3002,7 @@ static void ApplyLiveSettings(const Config *before) {
+@@ -2856,7 +3040,7 @@ static void ApplyLiveSettings(const Config *before) {
        g_current_window_scale = IntMin(g_config.window_scale, kMaxWindowScale);
      ChangeWindowScale(0);
    }
@@ -320,7 +388,7 @@ index 3bc3905..85691e6 100644
    snesrecomp_opengl_set_vsync(VSyncInterval());
  #endif
    if (g_renderer_funcs.Reconfigure) g_renderer_funcs.Reconfigure();
-@@ -2928,6 +3074,22 @@ static void RunInGameLauncher(bool *running, const char **exit_reason) {
+@@ -2928,6 +3112,22 @@ static void RunInGameLauncher(bool *running, const char **exit_reason) {
  #if !defined(RECOMP_LAUNCHER)
    (void)running; (void)exit_reason;
    host_report_breadcrumb("in-game launcher: this build has no launcher");
@@ -343,7 +411,7 @@ index 3bc3905..85691e6 100644
  #else
    host_report_breadcrumb("in-game launcher OPEN - guest frozen until RESUME "
                           "(or closing the launcher window)");
-@@ -3052,7 +3214,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
+@@ -3052,7 +3252,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
    g_simulation_hz = game->simulation_hz > 0 ? game->simulation_hz : SNES_HOST_NTSC_HZ;
    g_snes_width = game->frame_width > 0 ? game->frame_width : 256;
    g_snes_height = game->frame_height > 0 ? game->frame_height : 224;
@@ -352,7 +420,17 @@ index 3bc3905..85691e6 100644
    snesrecomp_opengl_set_viewport(game->compute_viewport);
  #endif
    const char *build_version = game->build_version ? game->build_version : "dev";
-@@ -3503,7 +3665,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
+@@ -3218,6 +3418,9 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
+   if (game->in_game_launcher)
+     PadGestureConfigure(&g_launcher_gesture, g_config.launcher_gesture,
+                         "Select+L3", "launcher", "LauncherGesture");
++  if (g_game_overlay && g_game_overlay->gesture)
++    PadGestureConfigure(&g_game_overlay_gesture, NULL, g_game_overlay->gesture,
++                        "game-overlay", "gesture");
+   tier2_capture_configure(args.expose_coverage_mod || g_config.expose_coverage_mod,
+                           g_config.coverage_capture, args.coverage_capture);
+ 
+@@ -3503,7 +3706,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
        g_current_window_scale * WindowBaseHeight();
  
    RendererApply(RendererChoice());
@@ -361,7 +439,7 @@ index 3bc3905..85691e6 100644
    if (g_config.output_method == kOutputMethod_OpenGL) {
      g_win_flags |= SDL_WINDOW_OPENGL;
      snesrecomp_opengl_set_vsync(VSyncInterval());
-@@ -3613,6 +3775,12 @@ error_reading:;
+@@ -3613,6 +3816,12 @@ error_reading:;
    }
  #endif
  
@@ -374,7 +452,7 @@ index 3bc3905..85691e6 100644
    /* SDL3 dropped the x/y arguments from SDL_CreateWindow. */
    SDL_Window *window = snesrecomp_sdl_create_window(
        g_window_title, window_width, window_height, g_win_flags);
-@@ -3634,6 +3802,9 @@ error_reading:;
+@@ -3634,6 +3843,9 @@ error_reading:;
    host_report_breadcrumb("renderer initialized: %s",
        g_config.output_method == kOutputMethod_OpenGL ? "opengl" :
        g_config.output_method == kOutputMethod_SDLSoftware ? "sdl-software" : "sdl");
@@ -384,7 +462,7 @@ index 3bc3905..85691e6 100644
  
    g_audio_mutex = SDL_CreateMutex();
    if (!g_audio_mutex) Die("No mutex");
-@@ -3696,18 +3867,36 @@ error_reading:;
+@@ -3696,18 +3908,36 @@ error_reading:;
      /* The SPC's native rate is 32040 Hz (1.024 MHz / 32), not 32000. The
       * consumer converts onto the device rate and cannot infer it. */
      RtlSetAudioOutputRate(have.freq);
@@ -423,7 +501,7 @@ index 3bc3905..85691e6 100644
    } else {
      host_report_breadcrumb("audio disabled in config");
    }
-@@ -3763,6 +3952,9 @@ error_reading:;
+@@ -3763,6 +3993,9 @@ error_reading:;
    if (frame_timing_path) g_frame_timings = calloc(kFrameTimingCapacity, sizeof(*g_frame_timings));
    bool profile_requested = g_frame_timings ||
        (HostGetenv("HOST_PROFILE") && atoi(HostGetenv("HOST_PROFILE")) != 0);
@@ -433,7 +511,7 @@ index 3bc3905..85691e6 100644
    unsigned profile_first = HostGetenv("HOST_PROFILE_START_FRAME")
        ? (unsigned)strtoul(HostGetenv("HOST_PROFILE_START_FRAME"), NULL, 10) : 1;
    if (!profile_first) profile_first = 1;
-@@ -3809,6 +4001,14 @@ error_reading:;
+@@ -3809,6 +4042,14 @@ error_reading:;
      host_report_crash_test_tick();
  
      double event_profile_start = ProfileStart();
@@ -448,7 +526,7 @@ index 3bc3905..85691e6 100644
      while (SDL_PollEvent(&event)) {
        if (HandleDeviceEvent(&event))
          continue;
-@@ -4021,7 +4221,11 @@ error_reading:;
+@@ -4021,7 +4262,11 @@ error_reading:;
        snes_host_clock_reset(&video_clock, video_now, g_simulation_hz, presentation_hz);
        g_reset_clock = false;
      }
@@ -461,7 +539,22 @@ index 3bc3905..85691e6 100644
        if (snes_host_clock_presentation_due(&video_clock, MonotonicSeconds())) {
          if (paced_custom) {
            double presented_at = MonotonicSeconds();
-@@ -4282,6 +4486,10 @@ error_reading:;
+@@ -4168,6 +4413,14 @@ error_reading:;
+       }
+     }
+     g_rewind_hotkey = 0;
++    if (g_game_overlay && g_game_overlay->open && !g_netplay_session &&
++        PadGesturePressed(&g_game_overlay_gesture) &&
++        !snes_rewind_is_open() && !snes_savestate_menu_is_open() &&
++        g_game_overlay->open()) {
++      RunGameOverlayLoop(&running);
++      GameReset();
++      continue;   /* guest was frozen: no frame to run or present */
++    }
+     /* Exactly ONE poll_open per frame: it latches the previous word to edge
+      * detect on, so a second call in the same frame eats the edge. */
+     (void)snes_savestate_menu_poll_open(human);
+@@ -4282,6 +4535,10 @@ error_reading:;
        running = false;
        exit_reason = "RUN_FRAMES reached";
      }
@@ -472,7 +565,7 @@ index 3bc3905..85691e6 100644
    }
  
    const double run_end = MonotonicSeconds();
-@@ -4539,7 +4747,7 @@ static void RequestScreenshot(void) {
+@@ -4539,7 +4796,7 @@ static void RequestScreenshot(void) {
      return;
    s_last_screenshot_time = now;
  
@@ -666,6 +759,52 @@ index 7e092bb..6e413a8 100644
  void PpuResetWidescreenOamHistory(Ppu *ppu);
  
  /* Rollback seam for PPU state that lives WITHIN a frame.
+diff --git a/runner/src/snes_game_overlay.h b/runner/src/snes_game_overlay.h
+new file mode 100644
+index 0000000..c64b96c
+--- /dev/null
++++ b/runner/src/snes_game_overlay.h
+@@ -0,0 +1,40 @@
++#ifndef SNES_GAME_OVERLAY_H
++#define SNES_GAME_OVERLAY_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * A game-owned full-screen overlay (for example a developer menu), run by the
++ * host exactly like the save-state browser: a pad gesture opens it, the guest
++ * stays FROZEN while it is open (no RtlRunFrame, no draw_ppu_frame), and the
++ * panel is presented over the frozen field at the browser's 512x448 size.
++ * The game may edit WRAM from its callbacks; the edits take effect when the
++ * guest resumes.
++ */
++typedef struct SnesGameOverlay {
++  /* Pad gesture in the [Controller] RewindGesture syntax, e.g. "Select+X". */
++  const char *gesture;
++  /* Called when the gesture fires; return nonzero if the overlay opened. */
++  int  (*open)(void);
++  int  (*is_open)(void);
++  void (*close)(void);
++  /* Seat 0's SNES pad word and a free-running millisecond clock. */
++  void (*poll_nav)(uint32_t pad, uint32_t ticks_ms);
++  /* SDL keycode; repeat is nonzero for auto-repeat events. */
++  void (*handle_key)(int key, int repeat);
++  /* ARGB8888 panel to present; return nonzero when one is available. */
++  int  (*overlay_image)(const uint32_t **px, int *w, int *h);
++} SnesGameOverlay;
++
++/* Register before the host runs; NULL removes it. Only one overlay. */
++void snes_game_overlay_register(const SnesGameOverlay *overlay);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SNES_GAME_OVERLAY_H */
 diff --git a/runner/src/snes_rewind.c b/runner/src/snes_rewind.c
 index 3507658..7343262 100644
 --- a/runner/src/snes_rewind.c

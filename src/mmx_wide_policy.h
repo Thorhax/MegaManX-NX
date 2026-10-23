@@ -28,6 +28,11 @@ uint16_t MmxWidePolicy_BeeEntrance(uint8_t ram[0x20000], uint16_t object,
 bool MmxWidePolicy_IsBossDoorBody(const uint16_t words[3][4], int row_index);
 /* Enemy-family identity, shared by original stages and fortress rematches. */
 bool MmxWidePolicy_IsBossEncounter(uint8_t object_id);
+/* Boss encounters plus the other enemy-pool objects whose initialization
+ * locks the camera or forces the world actor. Their spawn records keep the
+ * native entry timing: an early look-ahead spawn reorders them against the
+ * room's own event triggers and allocation order. */
+bool MmxWidePolicy_IsScriptedEncounter(uint8_t object_id);
 uint16_t MmxWidePolicy_BarrierEnemyState(const uint8_t ram[0x20000], uint16_t controller,
                                        uint16_t object, uint16_t state, bool custom);
 bool MmxWidePolicy_IsCollectible(uint8_t object_id);

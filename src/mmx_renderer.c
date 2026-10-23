@@ -113,6 +113,7 @@ static _Thread_local MmxRenderStats s_row_stats;
 #endif
 static uint8_t door_cache[512 * 512];
 static int airport_sky_width;
+static bool airport_upper_sky;
 typedef struct SubmarineBody {
   int left, top, bottom;
   unsigned shift;
@@ -143,6 +144,13 @@ MmxDisplayViewport MmxRendererDestination(MmxRenderView view, int width, int hei
   return SnesDisplayAspect_FitViewport(view.aspect, width, height);
 }
 static unsigned word(const uint8_t *p, unsigned a) { return p[a] | (p[a + 1] << 8); }
+static bool storm_upper_sky(const uint8_t *ram, int camera_y) {
+  return MmxWidePolicy_IsStageScene(ram) && ram[0x1f7a] == 5 &&
+      ram[0x1e89] == 6 && camera_y < 0x400;
+}
+bool MmxRendererNeedsStormSkyRepair(const uint8_t ram[0x20000]) {
+  return ram && storm_upper_sky(ram, (int)word(ram, 0x1e50));
+}
 static bool zero_weapons_menu(void) {
   return MmxZeroEnabled() && !frame_zero.active_x && frame.ram[0xd1] == 2 && frame.ram[0xd2] == 4 &&
       (((frame.ram[0x1f10] == 6 || frame.ram[0x1f10] == 8) && (frame.ram[0xc3] & 128)) ||
@@ -325,6 +333,78 @@ static unsigned fortress_waiting_pieces(Piece out[128], const Piece *pieces, uns
     for (unsigned i = 0; i < a[0] && count < 128; ++i)
       out[count++] = make_piece(a + i * 4, x - (int)camera,
           y - (int)word(r, 0x1e50), 0, attributes, actor == 2 ? r[0x18296] : 0, animation, 0, pose);
+  }
+  return count;
+}
+enum { MAX_STORM_PREVIEW_PIECES = 128 };
+static unsigned storm_dormant_pieces(Piece out[MAX_STORM_PREVIEW_PIECES],
+                                    const Piece *pieces, unsigned piece_count) {
+  const uint8_t *r = frame.ram;
+  if (r[0x1f7a] != 5 || frame_coop.initialized) return 0;
+  /* Solo's native $81:FAC5 / $81:FAA3 platform switches and heart scan must
+   * keep their allocator order for Magic Carpet. Draw their dormant art only
+   * in the margins instead. No guest execution, writes, clocks or host history:
+   * captures, rollback and repeated draws all use this same immutable frame.
+   * Dormant platforms wait at $86:DABF/DAD3's initial positions; movement and
+   * collision begin together when the real group initializes at $83:F009. */
+  unsigned live[11] = {0}; bool platforms = false, submitted_heart = false;
+  for (unsigned d = 0x1628; d < 0x1928; d += 48) if (r[d]) {
+    unsigned id = r[d + 10];
+    if (id != 0x0b && id != 0x0e) continue;
+    unsigned index = id == 0x0b ? 10 : r[d + 11] & 15;
+    if (index < 11) live[index] = d;
+    if (id == 0x0e) platforms = true;
+  }
+  /* RAM may already have freed an actor while the captured OAM epoch still
+   * displays it. That submitted art owns the handoff on removal too. */
+  for (unsigned i = 0; i < piece_count; ++i) {
+    const Piece *s = &pieces[i];
+    if (s->object < 0x1628 || s->object >= 0x1928 || (s->object - 0x1628) % 48) continue;
+    if (s->animation == 0x5b) platforms = true;
+    if (s->animation == 0x38) submitted_heart = true;
+  }
+  const uint8_t *positions = rom_at(0x86dabf, 40);
+  /* Storm's sole kind-0/$0B event, including its collected bit mask. */
+  const uint8_t *heart = rom_at(0x8591a9, 7);
+  unsigned count = 0;
+  for (unsigned actor = 0; actor < 11; ++actor) {
+    unsigned d = live[actor];
+    unsigned animation = actor == 10 ? 0x38 : 0x5b, pose = 0, flip = 0;
+    unsigned attributes = actor == 10 ? r[0xbb9] & 0x30 : 0x20;
+    int x = actor == 10 ? (heart ? (int)(word(heart, 5) & 0x7fff) : 0) :
+        positions ? (int)word(positions, actor * 2) : 0;
+    int y = actor == 10 ? (heart ? (int)(word(heart, 1) & 0x7fff) : 0) :
+        positions ? (int)word(positions, 20 + actor * 2) : 0;
+    if (d) {
+      bool submitted = false;
+      for (unsigned i = 0; i < piece_count; ++i) submitted |= pieces[i].object == d;
+      /* Allocation precedes initialization/submission. Do not use a reused
+       * slot's stale coordinates. E99D/F009 also leave one initialized frame
+       * before art submission; only those exact starting states qualify. */
+      bool initial = !r[d + 1] || (actor == 10 ?
+          r[d + 1] == 2 && !r[d + 2] && !r[d + 3] && r[d + 22] == 0x38 :
+          r[d + 22] == 0x5b && r[d + 23] == 0x80 &&
+          word(r, d + 5) == (unsigned)x && word(r, d + 8) == (unsigned)y);
+      if (submitted) continue;
+      if (!initial) {
+        /* Native updates can omit submission even while an initialized
+         * sprite is drawable ($0E). Keep its actual captured pose in the
+         * margins, never an extra tank at home or a reset platform twin.
+         * Collected/blinking heart states and hidden actors stay native. */
+        if (!r[d + 14] || r[d + 22] != animation ||
+            (actor == 10 && (r[d + 1] != 2 || r[d + 2] >= 6))) continue;
+        x = (int)word(r, d + 5); y = (int)word(r, d + 8) + (int8_t)r[d + 25];
+        pose = r[d + 23] & 127; flip = r[d + 17] & 0x40;
+        attributes = r[d + 17] & 0x3f;
+      }
+    } else if (actor < 10 && platforms) continue; /* Respect partial allocation. */
+    if (actor == 10 && (submitted_heart || !heart || (heart[0] & 15) || heart[3] != 0x0b ||
+        (r[0x1f9c] & heart[4]))) continue;
+    const uint8_t *a = sprite_arrangement(animation, pose);
+    if (!a || (actor < 10 && !positions)) continue;
+    for (unsigned i = 0; i < a[0] && count < MAX_STORM_PREVIEW_PIECES; ++i)
+      out[count++] = make_piece(a + i * 4, x - view_camera(r, 0x1e4d),
+          y - view_camera(r, 0x1e50), flip, attributes, 0, animation, 0, pose);
   }
   return count;
 }
@@ -916,6 +996,13 @@ static unsigned tile_pixel(const uint16_t *vram, unsigned address, int x, int y,
 }
 static void prepare_stage_planes(void) {
   airport_sky_width = 0; submarine_count = 0;
+  /* Magic Carpet can raise the camera above the airport while BG2's cloud
+   * scroller continues through negative Y and past its authored X range.
+   * Retail's circular VRAM then mixes clouds with stale runway/mountain
+   * tiles, even in 4:3. Repair presentation from the retained scene maps;
+   * no guest camera, tilemap, collision or actor state is changed. */
+  airport_upper_sky = g_mmx_render_asset_repairs &&
+      storm_upper_sky(frame.ram, view_camera(frame.ram, 0x1e50));
   if (frame.ram[0x1f7a] == 5 && frame.ram[0x1e89] == 0x0e &&
       word(frame.ram, 0x1e90) == 0 && word(frame.ram, 0x1e50) >= 0x300) {
     /* The airport panorama ends partway through screen 2 (640 pixels in
@@ -1092,7 +1179,7 @@ static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x,
     tile = weapon_menu_tile(tx, ty, tile);
   }
   if (stage && size == 8 && layer < 2 && !slime_surface &&
-      (x < 0 || x >= 256 || view_dx || view_dy)) {
+      (x < 0 || x >= 256 || view_dx || view_dy || airport_upper_sky)) {
     int wx, wy;
     if (layer == 0) {
       wx = MmxDisplay_ExpandStageScroll((uint16_t)word(frame.ram, 0x1e4d), p->hScroll[0]) + view_dx + x;
@@ -1147,6 +1234,13 @@ static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x,
        * Earlier columns are intentionally empty at this vertical scroll;
        * extend the arena's sky edge when a wide view reaches behind it. */
       if (frame.ram[0x1f7a] == 0 && stream_x >= 0xa00 && wx < 0xa00) wx = 0xa00;
+      if (airport_upper_sky) {
+        /* Source screen 3 is the seamless 256x256 cloud plane, repeated in
+         * screens 4..6. Wrap both axes there instead of indexing unrelated
+         * airport art or falling back to the stale circular PPU tilemap. */
+        wx = 0x300 + ((unsigned)wx & 255);
+        wy = (unsigned)wy & 255;
+      }
     }
     /* Reconstruct prepared map data independently of circular VRAM history.
      * Outside authored terrain, reflect only the background edge. */
@@ -1203,7 +1297,7 @@ static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x,
        * The complete ship resources are resident; retain its live binding. */
       if (layer == 1 && frame.ram[0x1f7a] == 0 && frame.ram[0x1e89] == 0x0c)
         asset_x = -1;
-    }
+    } else if (airport_upper_sky) return 0;
   }
   int cx = px & (size - 1), cy = py & (size - 1);
   if (tile & 0x4000) cx = size - 1 - cx;
@@ -1934,6 +2028,9 @@ typedef struct DrawCtx {
   const MmxWeaponShot *triad, *gravity, *cast_body;
   Piece waiting[128];
   const MmxSpriteAsset *waiting_zero;
+  Piece storm[MAX_STORM_PREVIEW_PIECES];
+  unsigned storm_count;
+  const MmxSpriteAsset *storm_heart, *storm_platform;
   const MmxSpriteAsset *piece_assets[MAX_PIECES];
   int16_t crystal_ripple[224];
   /* Per piece: whether, and which, OAM slots 16..127 of frame.lines[0] hold
@@ -1985,6 +2082,14 @@ static void draw_row(const DrawCtx *c, int y) {
   uint16_t objects[MMX_RENDER_MAX_WIDTH] = {0};
   int object_colors[MMX_RENDER_MAX_WIDTH];
   for (int x = 0; x < view.width; ++x) object_colors[x] = -1;
+  for (int i = (int)c->storm_count - 1; i >= 0; --i) {
+    Piece s = c->storm[i];
+    const MmxSpriteAsset *asset = s.animation == 0x38 ? c->storm_heart : c->storm_platform;
+    if (!asset) continue;
+    unsigned attr = (s.attr & 0xf000) | ((asset->attributes & 15) << 8);
+    sprite(&p, r, s.x, s.y, attr, s.size, y, view, objects, true, asset,
+        s.tile, object_colors, true, false, false);
+  }
   for (int i = (int)waiting_count - 1; i >= 0; --i) {
     Piece s = waiting[i];
     const MmxSpriteAsset *asset = s.animation == 0x53 ? waiting_zero : NULL;
@@ -2263,8 +2368,10 @@ static void draw_row(const DrawCtx *c, int y) {
     plain_bg_init(&plain[layer], &p, r, (unsigned)layer);
     /* background() rewrites BG1 off-stage (weapon menu) and in the Boss Rush
      * arena (ceiling handle, belt colors), and BG3 on the Boss Rush title
-     * menu; the plain path would skip all of them. */
+     * menu, and BG1/BG2 in Storm's repaired upper sky; the plain path
+     * would skip all of them. */
     plain_ok[layer] = g_mmx_render_fast_paths && !view_dx && !view_dy && !(layer == 0 && !stage) &&
+        !(layer < 2 && airport_upper_sky) &&
         !(layer == 0 && rush_arena) && !(layer == 2 && !stage && frame_rush.menu);
   }
   for (int sx = 0; sx < view.width; ++sx) {
@@ -2284,7 +2391,8 @@ static void draw_row(const DrawCtx *c, int y) {
     if (palette_fade) {
       for (int layer = 0; layer < 3; ++layer) if (bg_colors[layer] >= 0)
         bg_colors[layer] = MmxRenderAssetsFadeColor((uint16_t)bg_colors[layer], palette_fade);
-      if (object_colors[sx] >= 0)
+      /* Boss tints (packed transforms) recolor backgrounds only. */
+      if (object_colors[sx] >= 0 && palette_fade < 32)
         object_colors[sx] = MmxRenderAssetsFadeColor((uint16_t)object_colors[sx], palette_fade)|(object_colors[sx]&0x8000);
     }
     uint16_t camouflage_bg=0x500;
@@ -2530,6 +2638,13 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   unsigned waiting_count = stage && g_mmx_render_asset_repairs ?
       fortress_waiting_pieces(waiting, pieces, piece_count) : 0;
   const MmxSpriteAsset *waiting_zero = waiting_count ? MmxRenderAssetsCaptiveZero() : NULL;
+  Piece storm[MAX_STORM_PREVIEW_PIECES];
+  unsigned storm_count = stage && view.extra && g_mmx_render_asset_repairs ?
+      storm_dormant_pieces(storm, pieces, piece_count) : 0;
+  const MmxSpriteAsset *storm_heart = storm_count ?
+      MmxRenderAssetsResource(5, frame.ram[0x1f08], 0x36) : NULL;
+  const MmxSpriteAsset *storm_platform = storm_count ?
+      MmxRenderAssetsResource(5, frame.ram[0x1f08], 0x5a) : NULL;
   const MmxSpriteAsset *piece_assets[MAX_PIECES] = {0};
   MmxSpriteAsset camouflage_art;
   MmxSpriteAsset rush_flash_art[2];
@@ -2605,6 +2720,8 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   c->triad = triad; c->gravity = gravity; c->cast_body = cast_body;
   memcpy(c->waiting, waiting, waiting_count * sizeof(*waiting));
   c->waiting_count = waiting_count; c->waiting_zero = waiting_zero;
+  memcpy(c->storm, storm, storm_count * sizeof(*storm));
+  c->storm_count = storm_count; c->storm_heart = storm_heart; c->storm_platform = storm_platform;
   memcpy(c->piece_assets, piece_assets, piece_count * sizeof(*piece_assets));
   memcpy(c->crystal_ripple, crystal_ripple, sizeof(c->crystal_ripple));
   {

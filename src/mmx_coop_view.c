@@ -67,11 +67,12 @@ void MmxCoopViewsUpdateBounds(const uint8_t *r,const MmxCoopState *s) {
   unsigned stage=r[0x1f7a];
   if(bounds.stage!=stage) {memset(&bounds,0,sizeof(bounds));bounds.stage=(uint8_t)stage;}
   /* Native scripted rooms and transport still own both cameras. Re-seed
-   * after they release their locks; menus preserve the travel history. */
+   * after they release their locks; menus preserve the travel history.
+   * Vile's arena lock ($83:E842) is script-set, absent from region history. */
   if(s->scene_owner || s->stage_pending || r[0xd3]!=4) {bounds.valid=0;return;}
   if(s->menu_owner || r[0x1f10]>=6) return;
   for(unsigned d=0xe68;d<0x1228;d+=64) if(r[d] &&
-      (MmxWidePolicy_IsBossEncounter(r[d+10]) ||
+      (MmxWidePolicy_IsBossEncounter(r[d+10]) || (stage==9 && (r[d+10]==0x67 || r[d+10]==0x69)) ||
        (stage==1 && r[d+10]==0x21) || (stage==2 && r[d+10]==9))) {
     bounds.valid=0;return;
   }

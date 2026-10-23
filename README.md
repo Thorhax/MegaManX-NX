@@ -1,6 +1,6 @@
 # Mega Man X Recompiled for Nintendo Switch (MegaManX-NX)
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 **Author (Switch port):** Thorhax
 **Target:** Nintendo Switch homebrew (Atmosphère / Horizon OS)
 
@@ -21,6 +21,9 @@ The launcher, mods, password saves, save states and rewind all come with it.
 - **Boss Rush**: an endless two-at-a-time Maverick gauntlet with a high score, picked from the title menu.
 - **The full launcher** on the console: Mods, Controls and Settings. It works with a controller or the touchscreen, and has a built-in SD-card file browser.
 - **Password saves**, a **save-state browser** and **rewind**.
+- A **developer menu** for testing (− + X): pause the game, warp to any stage
+  and checkpoint, give or remove weapons, Sub Tanks, Heart Tanks and armor,
+  infinite health, and make defeated Mavericks and collected items come back.
 - **Bring your own ROM.** The NRO contains no ROM data, graphics or music. It reads them from your own ROM.
 
 ## Installation
@@ -49,6 +52,7 @@ The launcher, mods, password saves, save states and rewind all come with it.
 | − + A | Save-state browser |
 | − + right stick click | Rewind |
 | − + left stick click | Back to the launcher (the game resumes where you were) |
+| − + X | Developer menu (the game stays paused while it is open) |
 
 Remap the controls in the launcher's **Controls** page, or in `sdmc:/switch/MegaManX/config.ini`.
 

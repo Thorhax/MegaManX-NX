@@ -927,6 +927,7 @@ static void rush_projectile_defeat(unsigned seat,unsigned weapon) {
   check(s.defeated==count+1,"native weapon finishing hit counts exactly one defeat");
 }
 #include "mmx_boss_rush_coop_combat_test.inc"
+#include "mmx_boss_rush_reports_test.inc"
 static void rush_runtime_checks(uint8_t *start,uint8_t *expected,uint8_t *actual,size_t cap) {
   const char *coop_assets=getenv("MMX_BOSS_RUSH_COOP");
   const char *zero_assets=getenv("MMX_BOSS_RUSH_ZERO");
@@ -979,7 +980,7 @@ static void rush_runtime_checks(uint8_t *start,uint8_t *expected,uint8_t *actual
       !MmxBossRushGetState().bosses[0].phase && !MmxBossRushGetState().bosses[1].phase,
       "preparation waits for the central trigger before spawning bosses");
   check(g_ram[0x1f9a]==32 && g_ram[0x1f99]==255,"run starts fully upgraded");
-  for(unsigned i=0;i<4;++i) check((g_ram[0x1f83+i]&127)==28,"shared subtank starts full");
+  for(unsigned i=0;i<4;++i) check(g_ram[0x1f83+i]==0x8e,"shared subtank starts at the retail refill cap");
   for(unsigned i=0;i<8;++i) check(g_ram[0x1f88+i*2]==0xdc,"X1 weapon starts owned and full");
   check(!(g_ram[0x1f7e]&128),"Hadouken is not acquired");
   if(coop_assets) {
@@ -1110,6 +1111,7 @@ static void rush_runtime_checks(uint8_t *start,uint8_t *expected,uint8_t *actual
     puts("MMX BOSS RUSH ARENA CHECKS PASSED");
     return;
   }
+  if(getenv("MMX_BOSS_RUSH_REPORT_TEST")) {rush_report_checks(start,expected,cap);return;}
   if(getenv("MMX_BOSS_RUSH_COOP_COMBAT_TEST")) {rush_coop_combat_checks(start,expected,cap);return;}
   if(getenv("MMX_BOSS_RUSH_MENU_TEST")) {rush_return_title_checks();return;}
   if(getenv("MMX_BOSS_RUSH_STATE_FORMAT_TEST")) {rush_state_format_checks(start,expected,actual,cap);return;}

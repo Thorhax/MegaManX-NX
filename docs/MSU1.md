@@ -30,7 +30,8 @@ Non-looping tracks are:
 
 Special SPC commands handled by the plugin:
 
-- `$F5` resumes music and fades in.
+- `$F5` resumes the selected track and fades in, including after a capsule's
+  fade-out has stopped playback. It preserves the track's playback position.
 - `$F6` fades out and stops music.
 - `$FE` restores full music volume.
 - `$FF` ducks music volume for the pause menu.

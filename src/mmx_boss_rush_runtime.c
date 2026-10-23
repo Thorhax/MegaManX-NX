@@ -43,10 +43,10 @@ static const uint16_t globals[]={0x1f0c,0x1f0e,0x1f0f,0x1f13,0x1f14,0x1f15,
   0x1e5c,0x1e5d,0x1e5e,0x1e5f,0x1e60,0x1e61,0x1e62,0x1e63,
   0xc0,0xc1,0xc9,0xca,0xcb,0xcc,0xcd,
   0xc0c,0xbd8,0x1e54,0x1e55,0x1e74,0x1e75,0x1e76,0x1e77};
-/* Keep the $0BD8 array slot for existing snapshots, but never swap it:
- * it is the projected player's hurt latch, not a boss scene flag. Restoring
- * a boss's stale zero clears the world player's protection after contact. */
-static bool private_global(unsigned i) {return globals[i]!=0xbd8;}
+/* Retain the array slots for existing snapshots. These bytes belong to the
+ * projected player: swapping them clears hurt protection or an ice/grab lock
+ * when the boss's update returns. Entrance locks are suppressed separately. */
+static bool private_global(unsigned i) {return globals[i]!=0xbd8 && globals[i]!=0xc16;}
 static bool playing(void) {return MmxBossRushGetState().mode==MMX_RUSH_PLAYING;}
 static void equipment(uint8_t *r);
 static unsigned object_step(unsigned d) {return d<0x1628?64:d<0x1928?48:32;}
@@ -94,6 +94,15 @@ static void actor_hook(CpuState *cpu,uint32_t pc) {
 static void boss_hook(CpuState *cpu,uint32_t pc) {
   MmxBossRushState s=MmxBossRushGetState();int owner=MmxBossRushOwner(cpu->D);
   unsigned at=pc&0x7fffff;
+  if(at==0x00c6dd && (s.mode==MMX_RUSH_PREPARING || s.mode==MMX_RUSH_PLAYING)) {
+    /* An old save may already have its cursor on an invalid $90 empty tank.
+     * Recheck the reserve at confirmation as well as during menu navigation. */
+    unsigned cursor=g_ram[cpu->D+10];
+    if(cursor<10 || cursor>13 || !(g_ram[0x1f83+cursor-10]&128) ||
+        !(g_ram[0x1f83+cursor-10]&15)) {
+      interp_bridge_pre_opcode_redirect((pc&0xff0000)|0xc6f8);return;
+    }
+  }
   if(at==0x00c93c && (s.mode==MMX_RUSH_PREPARING || s.mode==MMX_RUSH_PLAYING)) {
     /* Full weapon inventory normally enables the Escape Unit. An endless
      * run ends only on death: use the retail unavailable cue/zero return,
@@ -191,6 +200,26 @@ static void boss_hook(CpuState *cpu,uint32_t pc) {
     if(end) {interp_bridge_pre_opcode_redirect((pc&0xff0000)|end);return;}
   }
   if(owner<0) return;
+  if(s.bosses[owner].object==cpu->D) {
+    /* Retail victory prologues grant the player indefinite protection before
+     * reaching the common death controller. Rush replaces that victory scene,
+     * so leave the player's existing hurt timer/latch intact. Each boundary
+     * skips only LDA #1 and the two victory flag writes, before the next LDA. */
+    unsigned end=at==0x01b6b2?0xb6ba:at==0x03b3ae?0xb3b6:
+        at==0x01c5ca?0xc5d2:at==0x078cb8?0x8cc0:
+        at==0x079326?0x932e:at==0x07d9bf?0xd9c7:0;
+    if(end) {interp_bridge_pre_opcode_redirect((pc&0xff0000)|end);return;}
+    if(s.bosses[owner].id==4 && (at==0x0790fb || at==0x079110)) {
+      /* Kuwanger's retail destinations assume a single-screen tower room.
+       * Keep his original target selection inside this arena's closed doors. */
+      unsigned left=s.camera_x+32;
+      unsigned right=s.camera_x+256+(g_ram[0x1f7a]==4?MMX_RUSH_MAMMOTH_SCROLL:0)-32;
+      unsigned x=cpu->A;if(x<left)x=left;if(x>right)x=right;
+      cpu->A=(uint16_t)x;cpu->_flag_Z=!x;cpu->_flag_N=x>>15;
+      cpu->P=(cpu->P&~0x82u)|(cpu->_flag_Z?2:0)|(cpu->_flag_N?128:0);
+      return;
+    }
+  }
   if(g_ram[0x1f7a]==4 && s.bosses[owner].id==0) {
     /* Move the native handle constructor and both body approach/landing
      * calculations together. Each hook follows the original 16-bit load or
@@ -316,7 +345,8 @@ void MmxBossRushHostFrame(void) {
   const unsigned bosses[]={0x849feb,0x84a003,0x84aadd,0x84a677,0x849b03,0x849b43,
     0x848fca,0x848fad,0x9ac7,0xdc36,0xdd47,0xd1ed,0x94d9,0x8c56,0xe68e,0x879258,0x879276,0x8088d6,0x849f19,0x849f2a,0x849f2f,0x849f7e,
     0x8885b5,0x888dab,0x888e0f,0x888d79,0x888d2f,0x888d5e,0x88876a,0x828297,0x82829d,0x83b192,
-    0x8498ff,0x84990d,0x81b7bf,0x81b81b,0x87efd2,0x87925e,0xc93c};
+    0x8498ff,0x84990d,0x81b7bf,0x81b81b,0x87efd2,0x87925e,0xc93c,
+    0x81b6b2,0x83b3ae,0x81c5ca,0x878cb8,0x879326,0x87d9bf,0x8790fb,0x879110,0xc6dd};
   for(unsigned i=0;i<sizeof(bosses)/sizeof(*bosses);++i)
     registered&=interp_bridge_add_pre_opcode_hook(bosses[i],boss_hook);
   static bool warned;
@@ -330,7 +360,9 @@ static bool title(const uint8_t *r) {
 static void equipment(uint8_t *r) {
   r[0x1f99]=0xff;r[0x1f9a]=32;r[0x1f98]=0x40;r[0xbcf]=0xa0;
   r[0x1f9c]=0xff;r[0x1f7e]&=0x7f; /* All hearts; Hadouken remains unacquired. */
-  for(unsigned i=0;i<4;++i) r[0x1f83+i]=0x9c;
+  /* Retail refill caps tanks at $8E. Bit 7 is ownership; bits 4..5
+   * must stay clear or the menu still considers a depleted tank nonempty. */
+  for(unsigned i=0;i<4;++i) r[0x1f83+i]=0x8e;
   for(unsigned i=0;i<8;++i) {r[0x1f87+i*2]=0;r[0x1f88+i*2]=0xdc;}
   MmxZeroHealthRespawn(r);
   r[0x1f80]=0; /* No spare-life re-entry. */
@@ -431,6 +463,13 @@ void MmxBossRushFrame(uint8_t *r,uint16_t input) {
   (void)r;(void)input;return;
 #else
   MmxBossRushState s=MmxBossRushGetState();unsigned pressed=input&~s.input;s.input=input;
+  if(s.mode==MMX_RUSH_PREPARING || s.mode==MMX_RUSH_PLAYING)
+    for(unsigned i=0;i<4;++i) {
+      /* Older Rush snapshots used $9C and could retain $90 after draining.
+       * Preserve their remaining native units while removing invalid bits. */
+      unsigned tank=r[0x1f83+i];
+      if(tank&128)r[0x1f83+i]=(uint8_t)(0x80|((tank&15)>14?14:tank&15));
+    }
   if(s.mode!=MMX_RUSH_OFF) MmxBossRushAudioTick();
   if(s.mode==MMX_RUSH_OFF) {
     if(!MmxBossRushEnabled()) {
@@ -535,6 +574,21 @@ void MmxBossRushAfterFrame(uint8_t *r) {
   MmxBossRushState s=MmxBossRushGetState();
   for(unsigned i=0;i<2;++i) {
     MmxBossRushBoss *b=&s.bosses[i];if(!b->phase) continue;
+    if(b->id==4 && b->phase==MMX_RUSH_FIGHTING && r[b->object]) {
+      /* Closed door tiles do not provide the tower's full boss-height walls.
+       * Bound the body as well as its destinations, including old saves that
+       * already put him behind a door. Native AI/animation continue unchanged. */
+      unsigned left=s.camera_x+32;
+      unsigned right=s.camera_x+256+(r[0x1f7a]==4?MMX_RUSH_MAMMOTH_SCROLL:0)-32;
+      unsigned x=word(r+b->object+5);
+      if(x<left)x=left;if(x>right)x=right;
+      put(r+b->object+5,x);
+      if(r[b->object+2]==4 && r[b->object+3]>=2 && r[b->object+3]<=4) {
+        unsigned target=word(r+b->object+0x3a);
+        if(target<left)target=left;if(target>right)target=right;
+        put(r+b->object+0x3a,target);
+      }
+    }
     unsigned native=r[b->object+1],hp=r[b->object+0x27]&127;
     /* State 4 is ordinary combat, 8 is a hit reaction and 6 is death.
      * Watching only state 4 misses a boss hit as its entrance completes. */

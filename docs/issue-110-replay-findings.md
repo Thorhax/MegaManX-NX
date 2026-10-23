@@ -79,3 +79,55 @@ For unchanged recordings, use `tools/replay_diagnostic.py` with the game's ROM
 and the recorded shared X3 source. The helper restores recorded active lobby
 options even if offline preferences differ. A checkpoint mismatch after a
 gameplay fix must remain a reported divergence; it is not a passing replay.
+
+## Sessions 7-9: Sigma 1 intro and Vile (2.2.7-alpha)
+
+[The third attachment set](https://github.com/mstan/MegaManXSNESRecomp/issues/110#issuecomment-6227175746)
+(Saber co-op, independent views, 256-pixel viewport) replays on the
+published 2.2.7 build with every checkpoint matched: 59 P1 segments, P1/P2
+per-tick hashes equal. No crash; each session ended with the host quitting.
+
+| Report | Cause | Change |
+| --- | --- | --- |
+| Session 7, X frozen after the Sigma 1 intro | Story Zero (`$33`) locks an idle world actor (`$88:A415` → `$84:9FEB`), dashes off, then releases (`$88:A4EE` → `$84:A003`). Independent views give each update the nearest player; at frame 3258 the release reset P2's walk while X kept `$0C16=$1E`. Highway already pinned `$33` to the world actor; Sigma 1 did not. | `$33` is a world-actor script on every stage. Saves already holding an orphaned `$1E` lock are repaired when no lock-capable object remains. |
+| Session 8 Vile softlock, session 9 "Vile skip" | The view spawn pass gave armored Vile (`$67`, `$85:9E5B`, x=`$0B30`) the 320-pixel enemy look-ahead, spawning him at frame 10078 before the stage trigger at x=`$0A80` (`$88:EBC1`, event `$0C`) released the door limit. His lock (`$83:E842`, `$1E5E=$1E60=$0A80`) was then reopened by that trigger at 10139 (`$1E60=$0F00`, pinned with hardware watchpoints). Session 9 walked out of the arena; session 8's unarmored Vile waited forever at `$88:DBF5` for `$1E60==$1E5E`. Single-player widescreen already forced native timing for this room. | `MmxWidePolicy_IsScriptedEncounter` (bosses, `$66`, `$67`, `$69`) keeps native spawn timing in both the view pass and the widescreen split scan; the view pass also honours `ForceNativeSpawnTiming` for every seat's camera; Vile's bodies suspend per-seat camera history like bosses, so neither view leaves his script-set arena. |
+
+Fixed-build replays diverge first exactly where the changes act (story Zero's
+`.2=$0E` state, frame 2213-2830; Vile's deferred spawn, frame 10078); other
+segments still match. Later Vile-room segments differ from their first frame
+because per-seat camera history is now suspended while Vile is alive.
+
+## Object-script audit
+
+`tools/audit_object_scripts.py` walks every object class of the seven pools
+from the ROM, every stage's spawn records (stage 9 cross-checked against a
+replay WRAM image), and the current policy in `src/`. It reports classes that
+lock or pose the player or write camera bounds, records the look-ahead can
+spawn out of native order, and lock/pose classes left exposed to nearest-player
+projection. Run `py -3 -I tools/audit_object_scripts.py --out audit.json`.
+
+Results applied:
+
+- Projection (independent views): Light capsule `$4D` and its child `$5C`
+  are world-actor scripts, and X beside an unentered capsule takes the world in
+  both camera modes. A ridden RT-55J (`$09`) and its pilot effect (`$07`) stay
+  with the rider. Every other lock-capable class keeps a held seat projected
+  until its release (`lock_capable` + `forced_seat`), so bosses still target
+  the nearest player. Gulpfer, bounce pads and Eagle's lift keep their own
+  ownership. The audit now reports no uncovered class.
+- Spawn timing: `$66` (`$85:9E43`) locks the player on spawn and waits for
+  x ≥ `$0900`; a 16:9 co-op view reached it while the door pinned the camera.
+- Not changed: Vile's paralysis shot (`$2F`) — the fight check shows its
+  release reaches whichever seat it held; Anglerge (`$21`) waits on its own
+  camera test. Remaining ordering rows (capsule, Kuwanger's elevator) write
+  camera bounds only on entry/boarding; `$48`'s x test selects sprite priority.
+
+Private checks (fixtures and traces never committed), each run with either seat
+driving and repeated with `MMX_COOP_SIGMA1_UNIFIED=1`:
+`MMX_COOP_SIGMA1_INTRO_FIXTURE` + `MMX_COOP_SIGMA1_INPUTS` (session 7,
+frame 3000), `MMX_COOP_SIGMA1_LOCKED_FIXTURE` (frame 4200, X already locked),
+and `MMX_COOP_SIGMA1_VILE_FIXTURE` (session 8 frame 9600 with its inputs; or
+session 9 frame 11999 with `MMX_COOP_SIGMA1_ZERO_WORLD=1`). The Vile check
+requires the arena lock to hold from Vile's initialization through unarmored
+Vile's entrance, both players back, and no seat held over 300 frames in the
+fight. All three were RED on 2.2.7 and are GREEN here.

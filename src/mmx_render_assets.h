@@ -16,6 +16,8 @@ void MmxRenderAssetsPreloadRush(void);
  * -1 is transparent; bit 16 retains native BG priority, low 15 bits BGR555. */
 int MmxRenderAssetsRushCeilingPixel(unsigned x,unsigned y);
 const MmxSpriteAsset *MmxRenderAssetsSprite(unsigned stage, unsigned section, unsigned sprite);
+/* Explicit ROM resource binding for presentation-only dormant actor art. */
+const MmxSpriteAsset *MmxRenderAssetsResource(unsigned stage, unsigned section, unsigned resource);
 /* Private residency for cross-stage boss/child actors in the rush arena. */
 const MmxSpriteAsset *MmxRenderAssetsRushSprite(unsigned stage,unsigned sprite);
 const MmxSpriteAsset *MmxRenderAssetsRushObjectSprite(const uint8_t ram[0x20000],
@@ -32,6 +34,10 @@ bool MmxRenderAssetsStingPalette(unsigned phase, uint16_t colors[16]);
 const MmxSpriteAsset *MmxRenderAssetsObjectSprite(const uint8_t ram[0x20000],
                                                 unsigned object, unsigned animation);
 bool MmxRenderAssetsRideArmorPalettePending(const uint8_t ram[0x20000], const uint16_t colors[16]);
+/* 0 = none; 1..31 = every channel brightened alike; otherwise a packed
+ * MMX_FADE_CHANNELS transform: per-channel amounts in bits 0..14 (as BGR555)
+ * and a common floor in bits 15..19. Only the uniform form reaches OBJ. */
+enum { MMX_FADE_CHANNELS = 1u << 20 };
 unsigned MmxRenderAssetsDeathPaletteFade(const uint8_t ram[0x20000], const uint16_t colors[256]);
 uint16_t MmxRenderAssetsFadeColor(uint16_t color, unsigned amount);
 typedef struct MmxBackgroundPalette {

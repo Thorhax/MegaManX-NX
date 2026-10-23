@@ -450,6 +450,10 @@ static const MmxSpriteAsset *MmxRenderAssetsSprite_unlocked(unsigned stage, unsi
   unsigned id = sprite < 256 ? sprite_resource[sprite] : 255;
   return id < 254 && ready[id] == 1 ? &assets[id] : NULL;
 }
+static const MmxSpriteAsset *MmxRenderAssetsResource_unlocked(unsigned stage, unsigned section, unsigned resource) {
+  stage_assets(stage, section);
+  return resource < 256 && ready[resource] == 1 ? &assets[resource] : NULL;
+}
 static const MmxSpriteAsset *MmxRenderAssetsRushSprite_unlocked(unsigned stage,unsigned sprite) {
   if(stage>=13 || sprite>=256 || !rom) return NULL;
   if(!rush_ready[stage][sprite]) {
@@ -849,7 +853,13 @@ const MmxBackgroundPalette *MmxRenderAssetsBackgroundPalettePhase(const uint8_t 
 uint16_t MmxRenderAssetsFadeColor(uint16_t color, unsigned amount) {
   unsigned result = 0;
   for (unsigned shift = 0; shift < 15; shift += 5) {
-    unsigned c = ((color >> shift) & 31) + amount;
+    /* A plain amount (< 32) brightens every channel alike. A packed
+     * MMX_FADE_CHANNELS transform carries one amount per channel and a
+     * floor (see MmxRenderAssetsDeathPaletteFade). */
+    unsigned add = amount < 32 ? amount : (amount >> shift) & 31;
+    unsigned floor = amount < 32 ? 0 : (amount >> 15) & 31;
+    unsigned c = ((color >> shift) & 31) + add;
+    if (c < floor) c = floor;
     result |= (c > 31 ? 31 : c) << shift;
   }
   return (uint16_t)result;
@@ -864,13 +874,39 @@ unsigned MmxRenderAssetsDeathPaletteFade(const uint8_t ram[0x20000], const uint1
    * every owned opaque color, from captured CGRAM (RAM can be a DMA ahead),
    * then apply it to private margin resources too: the anchored HUD and the
    * margin's stage tiles would otherwise stay unlit beside a white screen. */
-  for (unsigned fade = 0; fade <= 31; ++fade) {
+  /* The largest consistent amount: a saturated channel admits several, and
+   * private margin colors darker than the owned ones must reach white too. */
+  for (int fade = 31; fade >= 0; --fade) {
     unsigned checked = 0; bool match = true;
     for (unsigned i = 0; i < 128 && match; ++i) if ((i & 15) && base->valid[i]) {
       ++checked;
-      match = MmxRenderAssetsFadeColor(base->colors[i], fade) == colors[i];
+      match = MmxRenderAssetsFadeColor(base->colors[i], (unsigned)fade) == colors[i];
     }
-    if (checked && match) return fade;
+    if (checked && match) return (unsigned)fade;
+  }
+  /* Boss defeats tint first: $1F0A's palettes gain red alone, then every
+   * channel rises to white (red keeping its lead), then each channel falls
+   * back as a ceiling-limited floor. Infer each channel separately, again
+   * only as an exact transform of every owned color. */
+  unsigned packed = MMX_FADE_CHANNELS;
+  for (unsigned shift = 0; shift < 15 && packed; shift += 5) {
+    int add = 31;
+    for (; add >= 0; --add) {
+      bool match = true;
+      for (unsigned i = 0; i < 128 && match; ++i) if ((i & 15) && base->valid[i]) {
+        unsigned c = ((base->colors[i] >> shift) & 31) + (unsigned)add;
+        match = (c > 31 ? 31 : c) == ((colors[i] >> shift) & 31);
+      }
+      if (match) break;
+    }
+    packed = add < 0 ? 0 : packed | (unsigned)add << shift;
+  }
+  if (packed) return packed == MMX_FADE_CHANNELS ? 0 : packed;
+  for (unsigned floor = 1; floor <= 31; ++floor) {
+    bool match = true;
+    for (unsigned i = 0; i < 128 && match; ++i) if ((i & 15) && base->valid[i])
+      match = MmxRenderAssetsFadeColor(base->colors[i], MMX_FADE_CHANNELS | floor << 15) == colors[i];
+    if (match) return MMX_FADE_CHANNELS | floor << 15;
   }
   return 0;
 }
@@ -958,6 +994,12 @@ const MmxSpriteAsset *MmxRenderAssetsRushObjectSprite(const uint8_t ram[0x20000]
     unsigned object,unsigned stage,unsigned sprite) {
   assets_lock();
   const MmxSpriteAsset * result = MmxRenderAssetsRushObjectSprite_unlocked(ram, object, stage, sprite);
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsResource(unsigned stage, unsigned section, unsigned resource) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsResource_unlocked(stage, section, resource);
   assets_unlock();
   return result;
 }

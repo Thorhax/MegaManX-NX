@@ -27,6 +27,7 @@
 #include "mmx_replay.h"
 #include "desktop/sdl_compat.h"
 #include "mmx_boss_rush.h"
+#include "mmx_dev_menu.h"
 #include "mmx_boss_rush_audio.h"
 #include "netplay/snes_netplay.h"
 #include "host_paths.h"
@@ -56,7 +57,7 @@ static void MmxPrepareFrame(int dw, int dh, int *w, int *h) {
   /* A room has one logical field. Window size and each peer's offline pixel
    * preference cannot widen it. The offline setting is never overwritten. */
   SnesDisplayAspect aspect = SnesDisplayAspect_Clamp(MmxNetplayActive() ? 0 : g_config.display_aspect);
-  g_mmx_custom_renderer = !MMX_VARIANT_JP && (g_config.widescreen || MmxZeroEnabled() || MmxWeaponsEnabled() || MmxKncBugfixActive(0) || MmxKncBugfixActive(1) || MmxBossRushActive() || MmxBossRushGetState().menu);
+  g_mmx_custom_renderer = !MMX_VARIANT_JP && (g_config.widescreen || MmxZeroEnabled() || MmxWeaponsEnabled() || MmxKncBugfixActive(0) || MmxKncBugfixActive(1) || MmxBossRushActive() || MmxBossRushGetState().menu || MmxRendererNeedsStormSkyRepair(g_ram));
   g_mmx_custom_view = MmxRendererViewport(g_mmx_custom_aspect, dw, dh,
       aspect);
   if (!g_config.widescreen) {
@@ -306,6 +307,7 @@ int MMX_DESKTOP_ENTRY(int argc, char **argv) {
   }
   MmxConfigureCoopTrace(&argc, argv);
   ConfigUseStateMenuDefaults();
+  MmxDevMenuRegister();
   for (int arg = 1; arg + 1 < argc; ++arg) {
     if (strcmp(argv[arg], "--benchmark") && strcmp(argv[arg], "--benchmark-audio")) continue;
     s_benchmark_audio = !strcmp(argv[arg], "--benchmark-audio");

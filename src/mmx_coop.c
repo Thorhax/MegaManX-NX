@@ -481,6 +481,7 @@ void MmxCoopInitialize(uint8_t *r) {
 static void lift_close(void);
 static bool input_previous_valid[2]; /* see MmxCoopApplyInput */
 static uint16_t input_previous[2];
+static bool lock_holder_alive(const uint8_t *r);
 bool MmxCoopFrameTick(uint8_t *r) {
   if (!enabled || !state.initialized) return MmxWeaponsFrameTick(r);
   lift_close(); /* an elevator query never spans a frame */
@@ -550,6 +551,15 @@ bool MmxCoopFrameTick(uint8_t *r) {
    * scene for its partner. Project the owner before teleport_tick edits the
    * stored partner: capturing that partner again would reset its progress. */
   if(state.scene_owner && state.current!=state.anchor) MmxCoopSelect(r,state.anchor);
+  /* Repair saves made before lock_capable/world_script_object: a $84:9FEB
+   * lock ($0BAA/$0C16 = $1E) whose release went to the other seat. With no
+   * object left that could still release it, apply $84:A003 to that body. */
+  if(!state.stage_pending && !state.scene_owner && r[0xd3]==4 && !r[0x1f0c] && !r[0x1f23] &&
+      !r[0x1f31] && !r[0x1f3b] && !r[0x1f48] && !lock_holder_alive(r))
+    for(unsigned seat=0;seat<2;++seat) {
+      uint8_t *b=seat==state.current ? r+0xba8 : state.players[seat].body;
+      if(state.players[seat].status==MMX_COOP_ALIVE && b[2]==0x1e && b[0x6e]==0x1e) b[2]=b[3]=b[0x6e]=0;
+    }
   if((r[0xbcf]&127) && !(state.players[state.anchor^1].body[0x27]&127)) {
     /* Repair old co-op saves made after Penguin saw a dead world actor.
      * His combat state writes .30 only at $81:B6ED (player-dead latch).
@@ -793,8 +803,86 @@ static bool vile_capture(const uint8_t *r) {
     if(r[d] && r[d+10]==0x67 && r[d+1]==2 && r[d+2]==0x16) return true;
   return false;
 }
-static bool vile_script_object(unsigned d) {
+/* Objects whose native script drives the world actor through $0BA8: they
+ * force an action with the $84:9F7E..A075 helpers and later release it, or
+ * write the player's position directly, against whichever body is projected
+ * at the time. A nearest-player update in independent views would split
+ * that pair across seats and leave one body locked. Class identities are
+ * global; tools/audit_object_scripts.py lists every lock-capable class.
+ * Bosses and other combatants stay nearest-player: lock_capable keeps a held
+ * seat projected until its release instead (Velguarder, D-Rex, Mavericks). */
+static bool world_script_class(unsigned c) {
+  switch(c) {
+    case 0x33: /* story Zero: lock $88:A415, release $88:A4EE */
+    case 0x4d: /* Light capsule: lock $87:CBE4, release $87:CD20 */
+    case 0x5c: /* capsule child: release $88:A8EB, restores saved bounds */
+      return true;
+    default:
+      return false;
+  }
+}
+/* A seat piloting Ride Armor (action $2C) already owns the world actor
+ * (MmxCoopFrameTick); the armor's ejection pose and position writes belong to
+ * that rider, while either player may still board an empty armor. */
+static bool armor_ridden(void) {
+  for(unsigned i=0;i<2;++i) {
+    const uint8_t *b=i==state.current ? g_ram+0xba8 : state.players[i].body;
+    if(state.players[i].status==MMX_COOP_ALIVE && b[2]==0x2c) return true;
+  }
+  return false;
+}
+/* Ride Armor's pilot effect: eject pose $81:AE73 and $0BAD at $81:AF0E.
+ * Unarmored Vile's paralysis shot ($2F, lock $88:8505) is not listed: its
+ * release reaches whichever seat it held (issue110 Vile fight check). */
+static bool world_script_effect(unsigned c) {
+  return c==0x07 && armor_ridden();
+}
+/* Every class that calls the $84:9F7E..A075 lock helpers, per pool, from
+ * tools/audit_object_scripts.py. Gulpfer ($1D) and Eagle's lift ($48) keep
+ * their own seat ownership. */
+static bool lock_capable(unsigned d) {
   if(!g_ram[d]) return false;
+  unsigned c=g_ram[d+10];
+  if(d>=0xe68 && d<0x1228 && !((d-0xe68)%64)) switch(c) {
+    case 0x02: case 0x03: case 0x05: case 0x07: case 0x0a: case 0x0c: case 0x14:
+    case 0x1a: case 0x26: case 0x31: case 0x32: case 0x33: case 0x4d: case 0x52:
+    case 0x5c: case 0x5d: case 0x61: case 0x62: case 0x63: case 0x65: case 0x66:
+    case 0x67: case 0x69: return true;
+    default: return false;
+  }
+  if(d>=0x1428 && d<0x1628 && !((d-0x1428)%64)) return c==0x07 || c==0x16 || c==0x2f;
+  if(d>=0x1628 && d<0x1928 && !((d-0x1628)%48))
+    return c==0x01 || c==0x02 || c==0x05 || c==0x07 || c==0x0b || c==0x16;
+  if(d>=0x1928 && d<0x1d08 && !((d-0x1928)%32)) return c==0x08 || c==0x3f || c==0x41;
+  if(d>=0x1d08 && d<0x1e08 && !((d-0x1d08)%16)) return c==0x1d || c==0x20;
+  return false;
+}
+static bool lock_holder_alive(const uint8_t *r) {
+  for(unsigned d=0xe68;d<0x1228;d+=64)
+    if(lock_capable(d) || (r[d] && (r[d+10]==0x1d || r[d+10]==0x48))) return true;
+  for(unsigned d=0x1428;d<0x1628;d+=64) if(lock_capable(d)) return true;
+  for(unsigned d=0x1628;d<0x1928;d+=48) if(lock_capable(d)) return true;
+  for(unsigned d=0x1928;d<0x1d08;d+=32) if(lock_capable(d)) return true;
+  for(unsigned d=0x1d08;d<0x1e08;d+=16) if(lock_capable(d)) return true;
+  return false;
+}
+/* The one living seat held in a scripted forced action ($0C16 = body+$6E);
+ * the world actor when both are; -1 when none. Stored bodies are current:
+ * the caller has just captured the projected seat. */
+static int forced_seat(void) {
+  int seat=-1;unsigned count=0;
+  for(unsigned i=0;i<2;++i) {
+    const MmxCoopPlayer *p=&state.players[i];
+    if(p->status!=MMX_COOP_ALIVE || !(p->body[0x27]&127) || p->zero.swap_phase) continue;
+    if(p->body[0x6e]) {seat=(int)i;++count;}
+  }
+  return count>1 ? (int)state.anchor : seat;
+}
+static bool world_script_object(unsigned d) {
+  if(!g_ram[d]) return false;
+  if(d>=0xe68 && d<0x1228 && !((d-0xe68)%64) && (world_script_class(g_ram[d+10]) ||
+      (g_ram[d+10]==0x09 && armor_ridden()))) return true; /* RT-55J Ride Armor */
+  if(d>=0x1428 && d<0x1628 && !((d-0x1428)%64) && world_script_effect(g_ram[d+10])) return true;
   if(g_ram[0x1f7a]==0) {
     if(d>=0xe68 && d<0x1228 && !((d-0xe68)%64)) {
       unsigned c=g_ram[d+10];
@@ -831,6 +919,22 @@ static void begin_scene(uint8_t *r) {
   TRACE(SCENE,0,1,state.scene_owner,NULL);
   sound(r,0x0f);
 }
+/* X beside an unentered capsule (states 01 00 00 .. 01 02 02) takes the
+ * world actor. The capsule only ever runs against the world actor
+ * (world_script_class), in both camera modes. */
+static bool capsule_takes_world(uint8_t *r) {
+  unsigned xs=state.players[0].character==MMX_COOP_X ? 0 : 1;
+  if(state.players[xs].character!=MMX_COOP_X || xs==state.anchor) return false;
+  const uint8_t *xb=state.players[xs].body;
+  for(unsigned d=0xe68;d<0x1228;d+=64)
+    if(capsule_slot(d) && r[d+1]<=2 && r[d+2]<=2) {
+      int cx=(int)word(r+d+5)-(int)word(xb+5),cy=(int)word(r+d+8)-(int)word(xb+8);
+      if(cx>-96 && cx<96 && cy>-96 && cy<96) {
+        state.anchor=(uint8_t)xs;MmxCoopSelect(r,xs);return true;
+      }
+    }
+  return false;
+}
 static bool scene_tick(uint8_t *r) {
   /* Capsule acquisition deliberately clears the body lock ($87:CD20).
    * $1F48 stays set through the subsequent recorded-input demonstration,
@@ -844,6 +948,9 @@ static bool scene_tick(uint8_t *r) {
    * he keeps falling into the native death zone. The partner is also
    * beamed as soon as an unentered Dr. Light capsule ($4D) exists while he
    * is away: its camera lock is about to leave him behind. */
+  if(!state.scene_owner && MmxCoopViewsOnline() && state.players[0].status==MMX_COOP_ALIVE &&
+      state.players[1].status==MMX_COOP_ALIVE && (state.players[0].body[0x27]&127) &&
+      (state.players[1].body[0x27]&127)) capsule_takes_world(r);
   if(!state.scene_owner && !MmxCoopViewsOnline() && state.players[0].status==MMX_COOP_ALIVE &&
       state.players[1].status==MMX_COOP_ALIVE && (state.players[0].body[0x27]&127) &&
       (state.players[1].body[0x27]&127)) {
@@ -866,20 +973,10 @@ static bool scene_tick(uint8_t *r) {
     /* A capsule belongs to X, not to whoever drives the world: X near an
      * unentered capsule takes over the world, so its native script runs on
      * him; the capsule rule below then beams Zero over. */
-    unsigned xs=state.players[0].character==MMX_COOP_X ? 0 : 1;
-    if(state.players[xs].character==MMX_COOP_X && xs!=state.anchor) {
-      const uint8_t *xb=state.players[xs].body;
-      for(unsigned d=0xe68;d<0x1228;d+=64)
-        if(capsule_slot(d) && r[d+1]<=2 && r[d+2]<=2) {
-          int cx=(int)word(r+d+5)-(int)word(xb+5),cy=(int)word(r+d+8)-(int)word(xb+8);
-          if(cx>-96 && cx<96 && cy>-96 && cy<96) {
-            state.anchor=(uint8_t)xs;MmxCoopSelect(r,xs);
-            b=state.players[state.anchor^1].body;a=state.players[state.anchor].body;
-            dx=(int)word(b+5)-(int)word(a+5);dy=(int)word(b+8)-(int)word(a+8);
-            away=dx<-96 || dx>96 || dy<-64 || dy>64;capsule=away;
-            break;
-          }
-        }
+    if(capsule_takes_world(r)) {
+      b=state.players[state.anchor^1].body;a=state.players[state.anchor].body;
+      dx=(int)word(b+5)-(int)word(a+5);dy=(int)word(b+8)-(int)word(a+8);
+      away=dx<-96 || dx>96 || dy<-64 || dy>64;capsule=away;
     }
     if(low[state.anchor] && !low[state.anchor^1]) {
       /* The other player takes over the world before the low one leaves. */
@@ -1564,7 +1661,7 @@ static void contact_hook(CpuState *cpu,uint32_t pc) {
      * Zero walking into it moved it from Light's dialogue (state 6) to the
      * upgrade (state 8), so the armor sequence played under the text. */
     if (!state.contact_pass && (capsule_slot(cpu->D) ||
-        (at==0x9b03 && vile_script_object(cpu->D)))) return;
+        (at==0x9b03 && world_script_object(cpu->D)))) return;
     if (!state.contact_pass) {
       MmxCoopViewsContactPlayer(state.current);
       state.contact_pass = 1; state.contact_entry = (uint16_t)at;
@@ -1725,8 +1822,8 @@ static bool object_ghost_wanted(unsigned d) {
   if(enemy && (lift_elevator(d) || platform_item(d) || c==0x3d ||
       c==0x40 || c==0x43 || c==0x44 || capsule_slot(d) || c==0x1d)) return false;
   /* Bosses script the player (intros, victory pose); they stay single-seat. */
-  if(vile_script_object(d) || (enemy &&
-      (c==0x67 || c==0x69 || MmxWidePolicy_IsBossEncounter((uint8_t)c)))) return false;
+  if(world_script_object(d) || (enemy &&
+      MmxWidePolicy_IsScriptedEncounter((uint8_t)c))) return false;
   if(projectile && c==0x19) return false;
   /* The current generator's boxes reach about 200 px from its origin. */
   return ghost_near(d,256);
@@ -2347,8 +2444,15 @@ static void view_actor_hook(CpuState *cpu,uint32_t pc) {
   /* Vile, his restraint projectile and story Zero always use the world
    * actor, including independent views. Choosing a nearby partner here
    * would hand the capture back and forth between bodies. */
-  if(vile_script_object(cpu->D)) return;
+  if(world_script_object(cpu->D)) return;
   MmxCoopCapture(g_ram);
+  /* A script that forced a body's action releases that same body: while a
+   * seat is held, its lock-capable objects keep updating against it rather
+   * than whichever partner has since come nearer. */
+  if(lock_capable(cpu->D)) {
+    int held=forced_seat();
+    if(held>=0) {MmxCoopViewsActorReturn(state.current+1);MmxCoopSelect(g_ram,(unsigned)held);return;}
+  }
   unsigned nearest=state.anchor;uint64_t best=UINT64_MAX;
   bool fish=couch_nearest_target(cpu->D) && g_ram[cpu->D+10]==0x1d;
   bool pad=couch_nearest_target(cpu->D) && g_ram[cpu->D+10]==0x40;

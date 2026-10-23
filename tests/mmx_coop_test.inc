@@ -1116,6 +1116,7 @@ static void coop_slime_checks(const char *fixture,uint8_t *start,uint8_t *expect
 #include "mmx_coop_kuwanger_test.inc"
 #include "mmx_coop_octopus_test.inc"
 #include "mmx_coop_vile_test.inc"
+#include "mmx_coop_sigma1_replay_test.inc"
 #include "mmx_sigma_test.inc"
 #include "mmx_coop_bounce_test.inc"
 #include "mmx_hadouken_test.inc"

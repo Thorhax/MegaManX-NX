@@ -1,3 +1,4 @@
+#include "mmx_dev_menu.h"
 #include "mmx_rtl.h"
 #include "mmx_wide_policy.h"
 #include "mmx_renderer.h"
@@ -610,6 +611,7 @@ static bool s_ws_recover_armor;
 static int MmxWsMargin(void);
 void MmxOnStateLoaded(uint32_t version) {
   MmxReplayStateLoaded();
+  MmxDevMenuStateLoaded();
   MmxRendererReset();
   if(g_load_chunk_ok && g_load_complete) MmxBossRushSetState(&g_load_rush);
   else MmxBossRushReset();
@@ -1425,6 +1427,13 @@ int MmxWsSpawnRecordAllowed(uint16 dpage, uint8 type) {
   uint16 rec = MmxWsSpawnReadCursor(dpage);
   uint8 *descriptor = RomPtr(0x850000u | rec);
   const uint8 object_id = descriptor[3];
+  /* The Storm Eagle heart shares the chain platforms' allocator. Loading it
+   * into a wide margin while those ten slots are occupied changes its slot,
+   * even if the platform switches themselves keep native timing. Solo's
+   * phantom grab needs the heart's original scan as well; the native cursor
+   * and guest live/collected flags remain authoritative. */
+  if (!MmxCoopEnabled() && g_ram[0x1f7a] == 5 && kind == 0 && object_id == 0x0b)
+    return !s_ws_spawn_pass.visible_rescan && anchor == s_ws_spawn_pass.native_anchor;
   if (s_ws_spawn_pass.capsule_rescan) return kind == 3 && object_id == 0x4d;
   if (s_ws_spawn_pass.visible_rescan)
     return MmxWidePolicy_RescanSpawnRecord(g_ram[0x1f7a], kind, object_id);
@@ -1546,6 +1555,21 @@ void MmxWsCollectiblePass(CpuState *cpu) {
 }
 
 static bool s_view_spawn_pass;
+/* The widescreen spawn scan keeps Sigma 1's allocation-sensitive Vile room at
+ * native timing (MmxWsForceNativeSpawnTiming); the per-view scan must too, for
+ * every view: either player's camera can approach the room. Ordinary enemies
+ * reach 64px plus the render margin beyond the native spawn column. */
+static bool MmxViewNativeTiming(const MmxCoopState *coop) {
+  unsigned lookahead=64+(unsigned)g_mmx_custom_view.extra;
+  uint8_t stage=g_ram[0x1f7a];
+  if(MmxWidePolicy_ForceNativeSpawnTiming(stage,(uint16_t)(g_ram[0x1e4d]|g_ram[0x1e4e]<<8),lookahead))
+    return true;
+  for(unsigned seat=0;seat<2;++seat) {
+    MmxCoopView v=MmxCoopViewForPlayer(g_ram,coop,seat);
+    if(v.x>=0 && MmxWidePolicy_ForceNativeSpawnTiming(stage,(uint16_t)v.x,lookahead)) return true;
+  }
+  return false;
+}
 static bool MmxViewRecordWanted(unsigned flag,const MmxCoopState *coop) {
   if(flag<0xfa00 || flag>0xfffb) return false;
   unsigned rec=g_ram[flag+3]|g_ram[flag+4]<<8;
@@ -1556,7 +1580,7 @@ static bool MmxViewRecordWanted(unsigned flag,const MmxCoopState *coop) {
   if(kind>3) return false;
   /* Mechanisms, doors and encounter controllers retain their native entry
    * timing around a player. Ordinary enemies get the usual spawn hysteresis. */
-  bool scripted=kind!=3 || MmxWidePolicy_IsBossEncounter(desc[3]);
+  bool scripted=kind!=3 || MmxWidePolicy_IsScriptedEncounter(desc[3]) || MmxViewNativeTiming(coop);
   return MmxCoopViewContains(g_ram,coop,x,y,scripted?0:64,scripted?256:320,
       scripted?32:64,scripted?256:288,scripted?0:g_mmx_custom_view.extra);
 }
@@ -1629,6 +1653,12 @@ void MmxWsStreakerEntrance(uint16 object) {
 }
 
 uint16 MmxWsChainPlatformLine(CpuState *cpu, uint16 line) {
+  /* These switches allocate/free ten objects in the same pool as Heart
+   * Tanks. Early activation changes both the lift cycle and which slot is
+   * reused when a Boomerang delivers the heart (the Magic Carpet phantom
+   * grab). Keep the guest's activation points in solo play. Co-op retains
+   * its existing widened platform support for the two-player field. */
+  if (!MmxCoopEnabled()) return line;
   if (!g_mmx_custom_renderer || !MmxWsSpawnWide() || cpu->X != 5) return line;
   unsigned margin = MmxWsMargin();
   uint16 adjusted = MmxWidePolicy_ChainPlatformLine(g_ram, cpu->D, line, margin);

@@ -105,6 +105,8 @@ MmxRenderView MmxRendererViewport(MmxRenderAspect aspect, int width, int height,
 MmxDisplayViewport MmxRendererDestination(MmxRenderView view, int width, int height);
 void MmxRendererReset(void);
 void MmxRendererSetRom(const uint8_t *rom, size_t size);
+/* Use the compositor at native width too when Storm's upper sky needs repair. */
+bool MmxRendererNeedsStormSkyRepair(const uint8_t ram[0x20000]);
 /* Capture drawing data before native clipping; never modify guest state. */
 void MmxRendererRecordPiece(const uint8_t ram[0x20000], uint16_t scratch);
 void MmxRendererObserveObject(const uint8_t ram[0x20000], uint16_t object);

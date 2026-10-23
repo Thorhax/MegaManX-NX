@@ -15,7 +15,9 @@ static void frame(unsigned input) {
   MmxBeforeFrame();
   if(getenv("MMX_COOP_VIEWS_TEST") || getenv("MMX_COOP_VIEWS_BOOT_TEST") ||
       getenv("MMX_COOP_ONLINE_FIXTURE") || getenv("MMX_COOP_LIFT_REPLAY_FIXTURE") ||
-      getenv("MMX_COOP_REGION_REPLAY_FIXTURE") || getenv("MMX_COOP_WRAP_REPLAY_FIXTURE")) MmxCoopViewsSetOnline(true);
+      getenv("MMX_COOP_REGION_REPLAY_FIXTURE") || getenv("MMX_COOP_WRAP_REPLAY_FIXTURE") ||
+      getenv("MMX_COOP_SIGMA1_INTRO_FIXTURE") || getenv("MMX_COOP_SIGMA1_LOCKED_FIXTURE") ||
+      getenv("MMX_COOP_SIGMA1_VILE_FIXTURE")) MmxCoopViewsSetOnline(!getenv("MMX_COOP_SIGMA1_UNIFIED"));
   if(!MmxReplayPlaying() && getenv("MMX_REPLAY_TEST") && !strcmp(getenv("MMX_REPLAY_TEST"),"online")) {
     MmxCoopViewsSetIndependent(true);MmxCoopViewsSetOnline(true);MmxRendererSetPeerView(1);
   }
@@ -60,6 +62,7 @@ static void zero_capture(const char *base, const char *suffix) {
 #include "mmx_coop_replay_test.inc"
 #include "mmx_diagnostic_replay_test.inc"
 #include "mmx_boss_rush_runtime_test.inc"
+#include "mmx_magic_carpet_test.inc"
 static void zero_motion_checks(const char *fixture) {
   const char *path = getenv("MMX_ZERO_MOTION_REFERENCE");
   if (!path) path = MMX_ZERO_MOTION_REFERENCE_DEFAULT;
@@ -1949,6 +1952,7 @@ int main(int argc, char **argv) {
   MkDir("saves");
   size_t cap = 2u * 1024u * 1024u;
   uint8 *start = malloc(cap), *expected = malloc(cap), *actual = malloc(cap);
+  if(getenv("MMX_MAGIC_CARPET_TEST")) {magic_carpet_checks(getenv("MMX_MAGIC_CARPET_TEST"),start,expected,actual,cap);return 0;}
   if(getenv("MMX_BOSS_RUSH_TEST")) {rush_runtime_checks(start,expected,actual,cap);return 0;}
   const char *zero_assets = getenv("MMX_ZERO_TEST_ASSETS");
   const char *zero_title = getenv("MMX_ZERO_TITLE_FIXTURE");
@@ -1957,6 +1961,15 @@ int main(int argc, char **argv) {
   }
   if(getenv("MMX_COOP_REGION_REPLAY_FIXTURE")) {
     coop_region_replay_checks(zero_assets,getenv("MMX_COOP_REGION_REPLAY_FIXTURE"),start,expected,actual,cap);return 0;
+  }
+  if(getenv("MMX_COOP_SIGMA1_INTRO_FIXTURE")) {
+    sigma1_intro_checks(zero_assets,getenv("MMX_COOP_SIGMA1_INTRO_FIXTURE"),start,expected,actual,cap);return 0;
+  }
+  if(getenv("MMX_COOP_SIGMA1_LOCKED_FIXTURE")) {
+    sigma1_locked_checks(zero_assets,getenv("MMX_COOP_SIGMA1_LOCKED_FIXTURE"),start,expected,actual,cap);return 0;
+  }
+  if(getenv("MMX_COOP_SIGMA1_VILE_FIXTURE")) {
+    sigma1_vile_checks(zero_assets,getenv("MMX_COOP_SIGMA1_VILE_FIXTURE"),start,expected,actual,cap);return 0;
   }
   if(getenv("MMX_COOP_WRAP_REPLAY_FIXTURE")) {
     coop_region_replay_checks(zero_assets,getenv("MMX_COOP_WRAP_REPLAY_FIXTURE"),start,expected,actual,cap);return 0;

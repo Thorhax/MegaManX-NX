@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(MegaManXSNESRecomp VERSION 2.2.7 LANGUAGES C CXX)
+project(MegaManXSNESRecomp VERSION 2.2.9 LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_package(Git QUIET)
@@ -66,7 +66,7 @@ function(add_mmx_variant TARGET GEN_DIR CFG_DIR)
         src/mods/mmx_widescreen_plugin.c src/mods/mmx_msu1_plugin.c
         src/mods/mmx_hadouken_plugin.c src/mods/mmx_password_plugin.c src/mods/mmx_boss_rush_plugin.c src/mmx_password_save.cpp
         src/mods/mmx_zero_plugin.c src/mmx_zero.c src/mmx_weapons.c src/mmx_weapon_combat.c src/mmx_knc_bugfix.c src/mmx_coop.c src/mmx_coop_trace.c src/mmx_coop_view.c
-        src/mmx_hitbox_overlay.c
+        src/mmx_hitbox_overlay.c src/mmx_dev_menu.c
         src/mmx_boss_rush.c src/mmx_boss_rush_audio.c src/mmx_boss_rush_runtime.c src/mmx_boss_rush_draw.c src/mmx_boss_rush_score.cpp
         src/mmx_source_assets.cpp "${CMAKE_CURRENT_BINARY_DIR}/mmx_weapon_sources.h")
     target_compile_features(${TARGET} PRIVATE cxx_std_17)
@@ -168,6 +168,12 @@ if(BUILD_TESTING)
     target_include_directories(mmx_boss_rush_score_test PRIVATE src)
     target_compile_features(mmx_boss_rush_score_test PRIVATE cxx_std_17)
     add_test(NAME mmx_boss_rush_score COMMAND mmx_boss_rush_score_test)
+    add_executable(mmx_msu1_test tests/mmx_msu1_test.c src/mods/mmx_msu1_plugin.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c)
+    target_include_directories(mmx_msu1_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/msu-test")
+    add_test(NAME mmx_msu1 COMMAND mmx_msu1_test)
+    set_tests_properties(mmx_msu1 PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/msu-test")
     add_executable(mmx_source_assets_test tests/mmx_source_assets_test.cpp src/mmx_source_assets.cpp
         ${SNESRECOMP_ROOT}/runner/src/sha256.c "${CMAKE_CURRENT_BINARY_DIR}/mmx_weapon_sources.h")
     target_include_directories(mmx_source_assets_test PRIVATE src ${CMAKE_CURRENT_BINARY_DIR} ${SNESRECOMP_ROOT}/runner/src)
@@ -194,7 +200,7 @@ if(BUILD_TESTING)
         target_sources(${mmx_render} PRIVATE src/mmx_boss_rush_score.cpp)
         target_compile_features(${mmx_render} PRIVATE cxx_std_17)
     endforeach()
-    foreach(mmx_test mmx_boss_rush_test mmx_boss_rush_score_test mmx_display_test mmx_wide_policy_test mmx_renderer_test mmx_password_save_test mmx_zero_test)
+    foreach(mmx_test mmx_boss_rush_test mmx_boss_rush_score_test mmx_msu1_test mmx_display_test mmx_wide_policy_test mmx_renderer_test mmx_password_save_test mmx_zero_test)
         if(MSVC)
             target_compile_options(${mmx_test} PRIVATE /UNDEBUG)
         else()
@@ -228,5 +234,36 @@ if(TARGET mmx_state_tests)
     list(REMOVE_ITEM mmx_state_sources "${SNESRECOMP_ROOT}/runner/tests/mmx_state_runtime.c")
     set_property(TARGET mmx_state_tests PROPERTY SOURCES
         tests/mmx_adaptive_state_test.c ${mmx_state_sources})
+    if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mmx.sfc")
+        set(rush_report_dir "${CMAKE_CURRENT_BINARY_DIR}/boss-rush-reports")
+        file(MAKE_DIRECTORY "${rush_report_dir}")
+        add_test(NAME mmx_boss_rush_reports
+            COMMAND ${CMAKE_COMMAND} -E env SDL_AUDIODRIVER=dummy MMX_REPLAY_RECORD=0
+                MMX_BOSS_RUSH_TEST=1 MMX_BOSS_RUSH_REPORT_TEST=1
+                $<TARGET_FILE:mmx_state_tests> "${CMAKE_CURRENT_SOURCE_DIR}/mmx.sfc")
+        set_tests_properties(mmx_boss_rush_reports PROPERTIES
+            WORKING_DIRECTORY "${rush_report_dir}" LABELS "rom;boss-rush")
+        foreach(carpet_case native widescreen ultrawide no_shot)
+            set(carpet_env)
+            if(carpet_case STREQUAL "widescreen")
+                list(APPEND carpet_env MMX_MAGIC_CARPET_WIDE=1)
+            elseif(carpet_case STREQUAL "ultrawide")
+                list(APPEND carpet_env MMX_MAGIC_CARPET_WIDE=32:9)
+            elseif(carpet_case STREQUAL "no_shot")
+                list(APPEND carpet_env MMX_MAGIC_CARPET_WIDE=1 MMX_MAGIC_CARPET_NO_SHOT=1)
+            endif()
+            set(carpet_dir "${CMAKE_CURRENT_BINARY_DIR}/magic-carpet-${carpet_case}")
+            file(MAKE_DIRECTORY "${carpet_dir}")
+            add_test(NAME mmx_magic_carpet_${carpet_case}
+                COMMAND ${CMAKE_COMMAND} -E env
+                    --unset=MMX_MAGIC_CARPET_WIDE --unset=MMX_MAGIC_CARPET_NO_SHOT
+                    SDL_AUDIODRIVER=dummy MMX_REPLAY_RECORD=0
+                    "MMX_MAGIC_CARPET_TEST=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/magic_carpet_inputs.csv"
+                    ${carpet_env} $<TARGET_FILE:mmx_state_tests>
+                    "${CMAKE_CURRENT_SOURCE_DIR}/mmx.sfc")
+            set_tests_properties(mmx_magic_carpet_${carpet_case} PROPERTIES
+                WORKING_DIRECTORY "${carpet_dir}" LABELS "rom;magic-carpet")
+        endforeach()
+    endif()
 endif()
 include(cmake/saber.cmake)
