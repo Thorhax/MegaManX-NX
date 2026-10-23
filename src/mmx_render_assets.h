@@ -29,6 +29,10 @@ const MmxSpriteAsset *MmxRenderAssetsTeleportX(unsigned pose);
 const MmxSpriteAsset *MmxRenderAssetsWeaponX(unsigned weapon, bool body);
 /* Full native buster pose, independent of another co-op shot's CHR upload. */
 const MmxSpriteAsset *MmxRenderAssetsChargedBuster(unsigned group, unsigned pose);
+/* Native special-shot CHR/palette, including pose uploads and child objects.
+ * Index with the submitted native tile number, independently of shared VRAM. */
+const MmxSpriteAsset *MmxRenderAssetsNativeShot(const uint8_t ram[0x20000],
+    unsigned object,unsigned group,unsigned pose,unsigned seat);
 /* Charged Sting's original eight-step body palette sequence. */
 bool MmxRenderAssetsStingPalette(unsigned phase, uint16_t colors[16]);
 const MmxSpriteAsset *MmxRenderAssetsObjectSprite(const uint8_t ram[0x20000],

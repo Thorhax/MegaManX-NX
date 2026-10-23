@@ -87,3 +87,21 @@ movement recovery, and save/replay. Real enemy tests cover pull with AI held,
 native dissolve, charged acceleration/offscreen death, protected-category
 exclusion, and replay of both enemy paths. Original X3 and port orb/field/body
 captures were visually reviewed.
+
+## Boss Rush entrances
+
+Boss Rush body identity excludes the boss from Gravity Well from the moment
+its slot is allocated. Native bosses temporarily use state 2 and an ordinary
+damage category while their entrance and health fill run; those transient
+bytes alone cannot establish that an actor is an ordinary enemy. The same
+body check rejects retained victims and their renderer/AI override, so
+an older snapshot containing an illegal boss capture releases it without
+moving it or entering the ordinary-enemy dissolve path.
+Ordinary minions remain eligible when their ownership tag refers to that boss.
+
+The ROM-backed regression runs with `MMX_BOSS_RUSH_TEST=1`,
+`MMX_BOSS_RUSH_GRAVITY_TEST=1` and `MMX_WEAPONS_TEST_ASSETS` pointing to a
+locally extracted combined weapon cache. It casts with actual Y input before
+allocating each of the eight bosses in both seats, checks independent full
+entrances and zero defeats, and covers an illegal-capture snapshot and replay.
+Initial encounter removal is fixture setup, not a validated defeat.

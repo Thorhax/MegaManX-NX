@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 int mmx_desktop_main(int argc, char **argv);
+void MmxSwitchPlayIntro(void);
 int snesrecomp_rom_cache_read(char *path_out, size_t max_len);
 int snesrecomp_rom_cache_write(const char *rom_path);
 
@@ -159,6 +160,9 @@ int main(int argc, char **argv) {
   /* A chain-loaded restart (the in-game launcher, see host_relaunch.c)
    * carries the host's own flags; pass them through untouched. */
   int relaunched = argc > 1;
+  /* The Thorhax intro, once per start from the Homebrew Menu: a restart into
+   * the launcher (- + L3) goes straight back. */
+  if (!relaunched) MmxSwitchPlayIntro();
   int have_rom = FindRom();
   if (have_rom) fprintf(stderr, "[switch] rom=%s\n", s_rom_path);
 

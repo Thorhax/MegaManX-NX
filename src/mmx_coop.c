@@ -1029,6 +1029,7 @@ static void door_hook(CpuState *cpu,uint32_t pc) {
   if(!state.door_pass || cpu->S!=state.door_s || cpu->D!=state.door_d) return;
   TRACE(DOOR,pc,state.door_pass,0,cpu);
   if(at==0xe725 || at==0xecc7) {
+    MmxCoopViewsAdoptPlayer(g_ram,&state,state.current);
     state.anchor=state.current;state.door_pass=0;begin_scene(g_ram);return;
   }
   if(state.door_pass==1) {
@@ -1456,6 +1457,23 @@ void MmxCoopLiftCarry(uint8_t *r) {
   if(dx<-16 || dx>16 || dy<-16 || dy>16) return; /* warped, not carried */
   uint16_t x=(uint16_t)((body[5]|body[6]<<8)+dx),y=(uint16_t)((body[8]|body[9]<<8)+dy);
   body[5]=(uint8_t)x;body[6]=(uint8_t)(x>>8);body[8]=(uint8_t)y;body[9]=(uint8_t)(y>>8);
+}
+static void resume_hurt_timer(uint8_t *body) {
+  /* Native $0E starts $0C13, which later clears $0BD8/$0C32. A refill
+   * or stun can replace that action first while Rush bosses keep fighting.
+   * Resume the native countdown; never revoke a real hurt reaction, death,
+   * scripted hold, charged Sting or an already running protection interval. */
+  if((body[0x27]&127) && body[0x30] && !body[0x6b] && !body[0x6e] && !body[0x89] &&
+      body[2]!=0x0e && body[2]!=0x0c && body[2]!=0x1e)
+    body[0x6b]=0x3c;
+}
+void MmxCoopResumeHurtTimers(uint8_t *r) {
+  if(!r) return;
+  resume_hurt_timer(r+0xba8);
+  if(enabled && state.initialized) {
+    MmxCoopPlayer *partner=&state.players[state.current^1];
+    if(partner->status==MMX_COOP_ALIVE) resume_hurt_timer(partner->body);
+  }
 }
 /* Stage sections set the player's OBJ priority once, on the world actor:
  * entering Storm Eagle's ship writes .11 bit 4 (priority 3, in front of the

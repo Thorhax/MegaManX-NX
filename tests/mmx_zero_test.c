@@ -133,6 +133,28 @@ int main(void) {
   assert(MmxZeroUpgradeBits(0x81971c, 0) == 0);
   asset("zero-test.bin"); assert(MmxZeroLoad("zero-test.bin"));
   assert(MmxZeroUpgradeBits(0x81971c, 2) == 10);
+  ram[0xbc8]=0x52;ram[0xbc9]=0xa5;
+  assert(MmxZeroHeadProbe(ram,0xba8,0xed)==0xe5);
+  assert(MmxZeroHeadProbe(ram,0xba8,0)==0);
+  assert(MmxZeroHeadProbe(ram,0xe68,0xed)==0xed);
+  ram[0xbc8]=0x38;ram[0xbc9]=0xbb;
+  assert(MmxZeroHeadProbe(ram,0xba8,0xed)==0xed); /* Dash keeps X's terrain height. */
+  const unsigned crush_sites[] = {0x819ea5, 0x8499a4, 0x8198fc};
+  for (unsigned modern = 0; modern < 2; ++modern) {
+    MmxZeroSetModern(modern);
+    for (unsigned i = 0; i < sizeof(crush_sites) / sizeof(crush_sites[0]); ++i) {
+      unsigned bit = i == 2 ? 8 : 1;
+      for (unsigned inventory = 0; inventory < 256; ++inventory) {
+        assert(MmxZeroUpgradeBits(crush_sites[i], inventory) == (inventory | bit));
+        assert(MmxZeroUpgradeBits(crush_sites[i] & 0x7fffff, inventory) == (inventory | bit));
+        MmxZeroState x = MmxZeroGetState(); x.active_x = 1; MmxZeroSelectState(x);
+        assert(MmxZeroUpgradeBits(crush_sites[i], inventory) == inventory);
+        x.active_x = 0; MmxZeroSelectState(x);
+      }
+    }
+  }
+  MmxZeroSetModern(false);
+  MmxZeroResetState();
   assert(MmxZeroUpgradeBits(0x8197da, 0) == 0); /* Special charge stays upgrade-gated. */
   assert(MmxZeroMuzzle(ram,0x1228,0,0,16) == 24);
   assert(MmxZeroMuzzle(ram,0x1228,0,1,253) == 247);

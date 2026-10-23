@@ -17,7 +17,7 @@ static void frame(unsigned input) {
       getenv("MMX_COOP_ONLINE_FIXTURE") || getenv("MMX_COOP_LIFT_REPLAY_FIXTURE") ||
       getenv("MMX_COOP_REGION_REPLAY_FIXTURE") || getenv("MMX_COOP_WRAP_REPLAY_FIXTURE") ||
       getenv("MMX_COOP_SIGMA1_INTRO_FIXTURE") || getenv("MMX_COOP_SIGMA1_LOCKED_FIXTURE") ||
-      getenv("MMX_COOP_SIGMA1_VILE_FIXTURE")) MmxCoopViewsSetOnline(!getenv("MMX_COOP_SIGMA1_UNIFIED"));
+      getenv("MMX_COOP_SIGMA1_VILE_FIXTURE") || getenv("MMX_COOP_SIGMA1_LADDER_FIXTURE")) MmxCoopViewsSetOnline(!getenv("MMX_COOP_SIGMA1_UNIFIED"));
   if(!MmxReplayPlaying() && getenv("MMX_REPLAY_TEST") && !strcmp(getenv("MMX_REPLAY_TEST"),"online")) {
     MmxCoopViewsSetIndependent(true);MmxCoopViewsSetOnline(true);MmxRendererSetPeerView(1);
   }
@@ -58,11 +58,13 @@ static void zero_capture(const char *base, const char *suffix) {
 #include "mmx_zero_modern_test.inc"
 #include "mmx_graphics_pacing_test.inc"
 #include "mmx_hitbox_overlay_test.inc"
+#include "mmx_zero_saber_perf_test.inc"
 #include "mmx_saber_lock_test.inc"
 #include "mmx_coop_replay_test.inc"
 #include "mmx_diagnostic_replay_test.inc"
 #include "mmx_boss_rush_runtime_test.inc"
 #include "mmx_magic_carpet_test.inc"
+#include "mmx_zero_blocks_test.inc"
 static void zero_motion_checks(const char *fixture) {
   const char *path = getenv("MMX_ZERO_MOTION_REFERENCE");
   if (!path) path = MMX_ZERO_MOTION_REFERENCE_DEFAULT;
@@ -1860,6 +1862,7 @@ static void zero_state_checks(const char *assets, const char *fixture, uint8 *st
   check(!g_mmx_custom_renderer && !MmxZeroEnabled(), "disabling returns to stock presentation");
   puts("MMX ZERO RUNTIME CHECKS PASSED");
 }
+#include "mmx_frame_cost_test.inc"
 int main(int argc, char **argv) {
   check(argc == 2 || argc == 3, "ROM supplied");
   SDL_SetMainReady();
@@ -1952,10 +1955,42 @@ int main(int argc, char **argv) {
   MkDir("saves");
   size_t cap = 2u * 1024u * 1024u;
   uint8 *start = malloc(cap), *expected = malloc(cap), *actual = malloc(cap);
+  if(getenv("MMX_ZERO_BLOCKS_TEST")) {zero_blocks_checks(getenv("MMX_ZERO_TEST_ASSETS"));return 0;}
+  if (getenv("MMX_FRAME_COST_TEST")) {
+    frame_cost_checks(start, expected, actual, cap);
+    return 0;
+  }
+  if (getenv("MMX_NETPLAY_FIXTURE_OUT")) {
+    /* Create a current-build fixture through normal boot and landing. The
+     * general save/rewind test's slot can be a menu or transition snapshot. */
+    hitbox_boot();
+    unsigned waited;
+    for (waited = 0; waited < 600; ++waited) {
+      if (g_ram[0xba9] == 2 && !g_ram[0xbaa] && (g_ram[0xbd3] & 4) &&
+          (g_ram[0xbcf] & 127)) break;
+      frame(0);
+    }
+    check(waited < 600, "fresh Highway fixture stands on real ground");
+    check(RtlSaveSnapshot(getenv("MMX_NETPLAY_FIXTURE_OUT")), "fresh netplay fixture saves");
+    puts("MMX NETPLAY FIXTURE CREATED");
+    return 0;
+  }
   if(getenv("MMX_MAGIC_CARPET_TEST")) {magic_carpet_checks(getenv("MMX_MAGIC_CARPET_TEST"),start,expected,actual,cap);return 0;}
   if(getenv("MMX_BOSS_RUSH_TEST")) {rush_runtime_checks(start,expected,actual,cap);return 0;}
+  if(getenv("MMX_ZERO_SABER_PERF_TEST")) {
+    check(MmxZeroLoad(getenv("MMX_ZERO_TEST_ASSETS")),"performance test loads original X3 Zero");
+    MmxZeroRegisterHooks();
+    if(getenv("MMX_PERF_COOP")) {
+      check(MmxCoopEnable(MMX_COOP_ZERO),"performance test enables native Zero/X co-op");MmxCoopRegisterHooks();
+    }
+    hitbox_boot();zero_replay(60);
+    saber_perf_checks("campaign",start,expected,actual,cap);return 0;
+  }
   const char *zero_assets = getenv("MMX_ZERO_TEST_ASSETS");
   const char *zero_title = getenv("MMX_ZERO_TITLE_FIXTURE");
+  if(getenv("MMX_COOP_SIGMA1_LADDER_FIXTURE")) {
+    sigma1_ladder_checks(zero_assets,getenv("MMX_COOP_SIGMA1_LADDER_FIXTURE"),start,expected,actual,cap);return 0;
+  }
   if(getenv("MMX_COOP_LIFT_REPLAY_FIXTURE")) {
     coop_eagle_replay_checks(zero_assets,getenv("MMX_COOP_LIFT_REPLAY_FIXTURE"),start,expected,actual,cap);return 0;
   }

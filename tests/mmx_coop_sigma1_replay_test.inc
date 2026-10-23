@@ -20,6 +20,70 @@ static const uint8_t *sigma1_body(const MmxCoopState *s,unsigned seat) {
   return seat==s->current ? g_ram+0xba8 : s->players[seat].body;
 }
 static bool sigma1_forced(const uint8_t *b) { return b[2]==0x1e || b[0x6e]; }
+/* Session 10: P2 climbs to the upper door while X remains below. The door
+ * must take the entrant's camera and authored bounds before it freezes
+ * gameplay; replay inputs alone then complete its native scroll and release.
+ * MMX_PERF_MOD_ROOT/X1_ROM/X3_ROM activate the full recorded Saber behavior. */
+static void saber_perf_activate(void);
+static void sigma1_ladder_checks(const char *assets,const char *fixture,
+    uint8_t *start,uint8_t *expected,uint8_t *actual,size_t cap) {
+  coop_replay_start(assets);RtlEnableExtendedFrameTiming();
+  saber_perf_activate();
+  g_config.no_sprite_limits=true;MmxCoopViewsSetIndependent(true);
+  static unsigned p1[1200],p2[1200];
+  unsigned count=sigma1_inputs(getenv("MMX_COOP_SIGMA1_INPUTS"),p1,p2,1200);
+  check(count==600,"ladder trace covers the recorded upper-door approach");
+  for(unsigned driver=0;driver<2;++driver) {
+    check(RtlLoadSnapshot(fixture),"captured Sigma 1 ladder checkpoint loads");
+    if(driver) {
+      sigma1_swap_seats();
+      MmxCoopViewBoundsState bounds=MmxCoopViewsGetBoundsState();
+      for(unsigned i=0;i<4;++i) {
+        uint16_t v=bounds.limits[0][i];bounds.limits[0][i]=bounds.limits[1][i];bounds.limits[1][i]=v;
+      }
+      bounds.valid=(uint8_t)((bounds.valid>>1)|((bounds.valid&1)<<1));
+      MmxCoopViewsSetBoundsState(&bounds);
+    }
+    MmxCoopState s=MmxCoopGetState();unsigned entrant=driver^1;
+    check(g_ram[0x1f7a]==9 && !s.scene_owner && s.anchor==driver &&
+        coop_y(&s.players[entrant])<700 && coop_y(&s.players[driver])>1200,
+        "entrant starts above the world actor in the native ladder shaft");
+    bool entered=false,scrolled=false,released=false;
+    unsigned tick;
+    for(tick=0;tick<1400;++tick) {
+      unsigned a=tick<count?p1[tick]:0,b=tick<count?p2[tick]:0;
+      coop_frames(1,driver?b:a,driver?a:b);s=MmxCoopGetState();
+      if(s.scene_owner && !entered) {
+        entered=true;
+        check(s.scene_owner==entrant+1 && eagle_word(g_ram+0x1e50)==256,
+            "upper door keeps its entrant's camera on the first scripted frame");
+      }
+      scrolled|=entered && eagle_word(g_ram+0x1e4d)==4096 && !g_ram[0x1f13];
+      if(entered && scrolled && !s.scene_owner) {released=true;break;}
+    }
+    fprintf(stderr,"sigma1 ladder driver=%u tick=%u entered=%u scrolled=%u returned=%u camera=%u,%u xy=%u,%u/%u,%u\n",
+        driver,tick,entered,scrolled,released,eagle_word(g_ram+0x1e4d),eagle_word(g_ram+0x1e50),
+        coop_x(&s.players[0]),coop_y(&s.players[0]),coop_x(&s.players[1]),coop_y(&s.players[1]));
+    check(entered && scrolled && released,"native upper-door scroll finishes and returns the distant partner");
+    for(unsigned seat=0;seat<2;++seat) {
+      const uint8_t *body=sigma1_body(&s,seat);
+      check(s.players[seat].status==MMX_COOP_ALIVE && (body[0x27]&127) &&
+          !body[0x6e] && !s.players[seat].zero.swap_phase &&
+          coop_x(&s.players[seat])>=4096 && coop_y(&s.players[seat])<480,
+          "both living seats return inside the upper room with native controls released");
+    }
+    unsigned x[2]={coop_x(&s.players[0]),coop_x(&s.players[1])};
+    coop_frames(4,SNES_PAD_RIGHT,SNES_PAD_RIGHT);s=MmxCoopGetState();
+    check(coop_x(&s.players[0])>x[0]+2 && coop_x(&s.players[1])>x[1]+2,
+        "both returned players walk under their own input after the door");
+    size_t n=RtlSaveSnapshotToMemory(start,cap);check(n,"ladder handoff snapshot saves");
+    coop_frames(24,SNES_PAD_RIGHT,SNES_PAD_LEFT);size_t en=RtlSaveSnapshotToMemory(expected,cap);
+    check(RtlLoadSnapshotFromMemory(start,n),"ladder handoff snapshot restores");
+    coop_frames(24,SNES_PAD_RIGHT,SNES_PAD_LEFT);
+    same(expected,en,actual,RtlSaveSnapshotToMemory(actual,cap),"ladder handoff replays byte-exactly after rollback");
+  }
+  puts("MMX ISSUE110 SIGMA1 LADDER CHECKS PASSED");
+}
 static void sigma1_moves(unsigned seat,const char *what) {
   MmxCoopState s=MmxCoopGetState();unsigned x=coop_x(&s.players[seat]);
   coop_frames(30,seat?0:SNES_PAD_RIGHT,seat?SNES_PAD_RIGHT:0);s=MmxCoopGetState();

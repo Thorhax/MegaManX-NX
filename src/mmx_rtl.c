@@ -925,6 +925,7 @@ void MmxDrawPpuFrame(void) {
     g_mmx_native_raster = env && *env && *env != '0';
     s_native_raster_init = true;
   }
+  if (g_mmx_custom_renderer) MmxRendererBeginHardwareRaster(g_ppu);
   for (int i = 0; i <= 224; i++) {
     if (g_mmx_custom_renderer) MmxRendererCaptureLine(g_ppu, i);
     g_ppu_skip_line_pixels = g_mmx_custom_renderer && !g_mmx_native_raster &&
@@ -947,10 +948,14 @@ void MmxDrawPpuFrame(void) {
        * pop). Without it cpu->S drifts on every interrupt. */
       cpu_push_interrupt_frame(&g_cpu);
       I_IRQ(&g_cpu);
+      /* IRQs may run native mod hooks as well as ordinary PPU port writes.
+       * Recompare VRAM even when no observed port write incremented its count. */
+      MmxRendererHardwareVramChanged();
       trigger = g_snes->vIrqEnabled ? g_snes->vTimer + 1 : -1;
     }
   }
   g_ppu_skip_line_pixels = g_ppu_skip_line_sprites = false;
+  MmxRendererEndHardwareRaster();
 }
 
 void RunOneFrameOfGame(void) {

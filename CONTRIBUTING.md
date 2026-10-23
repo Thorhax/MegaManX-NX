@@ -51,6 +51,30 @@ Run `bash tools/regen.sh usa` when changing the recompiler or generated-code
 configuration; omitting `--no-tests` also runs the real framework test suite.
 Use `--strict-idempotent` when a change can affect emitted C.
 
+For the ROM-backed X3 Zero saber benchmark, build `mmx_state_tests` with
+`-DMMX_STATE_TESTS=ON` and run it with the X1 ROM from an empty working
+directory. Set `MMX_ZERO_SABER_PERF_TEST=1`, `MMX_REPLAY_RECORD=0`,
+`SDL_AUDIODRIVER=dummy` and `MMX_ZERO_TEST_ASSETS` to the locally extracted
+X3 Zero cache. Add `MMX_BOSS_RUSH_TEST=1` and set `MMX_BOSS_RUSH_ZERO` to
+the same cache to measure Boss Rush. The test writes `saber-performance.csv`,
+warms each scenario before comparing diagnostics off/on, separates simulation
+and drawing costs, and requires byte-identical resulting snapshots. Cases
+cover idle, repeated swings, positioned real boss hits, and the full native
+charge/two-buster/saber input chain. Readiness is bypassed only for the isolated
+swing probes; the full-chain probe instead protects the player while charging.
+For the same comparison in local co-op, add `MMX_PERF_COOP=1` for campaign, or
+set `MMX_BOSS_RUSH_COOP` to the Zero cache and `MMX_BOSS_RUSH_COOP_P1_ZERO=1`
+for Boss Rush. Port 1 attacks as Zero; port 2 remains X.
+
+For native block-crushing checks, run `mmx_state_tests` from an empty working
+directory with the X1 ROM, `MMX_ZERO_BLOCKS_TEST=1`, `MMX_ZERO_TEST_ASSETS`
+pointing to the extracted X3 Zero cache, `MMX_REPLAY_RECORD=0`, and
+`SDL_AUDIODRIVER=dummy`. The test arranges contact with a real Flame Mammoth
+block and calls the native head/foot destruction routines through compiled
+and interpreted execution; it checks Zero's innate abilities, X's upgrade
+gates, and unchanged inventory in both behavior
+modes. It does not validate the full route to the capsule.
+
 ## Change the framework dependency
 
 The `snesrecomp` gitlink is the single source of truth for the framework

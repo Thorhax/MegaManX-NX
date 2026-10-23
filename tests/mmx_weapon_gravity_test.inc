@@ -57,11 +57,14 @@ static void weapon_gravity_checks(const char *assets,const char *fixture,uint8 *
         (g_ram[d+0x27]&127) && g_ram[d+0x28]<6 && (g_ram[d+0x20]|g_ram[d+0x21])) {victim=d;break;}
   }
   check(victim!=0,"real native enemy found for gravity interaction");
+  /* Ownership alone also tags ordinary minions; immunity belongs to the
+   * boss body, not every actor spawned by it. Keep the real enemy mechanics. */
+  MmxBossRushSetOwner(victim,0);
   uint8_t enemy[64];memcpy(enemy,g_ram+victim,64);
   MmxWeaponsState w=MmxWeaponsGetState();w.page=2;w.weapon=6;MmxWeaponsSetState(w);
   frame(0);frame(SNES_PAD_Y);frame(0);zero_replay(60);
   MmxWeaponCombatState c=MmxWeaponsGetCombatState();const MmxWeaponShot *p=MmxWeaponsMovedEnemy(&c,victim);
-  check(p!=NULL,"formed well captures ordinary native enemy");
+  check(p!=NULL,"formed well still captures an ordinary enemy with a boss ownership tag");
   unsigned px=g_ram[victim+5]|g_ram[victim+6]<<8,py=g_ram[victim+8]|g_ram[victim+9]<<8;
   uint8_t action[3];memcpy(action,g_ram+victim+1,3);zero_replay(10);
   check(!memcmp(action,g_ram+victim+1,3) && ((unsigned)(g_ram[victim+5]|g_ram[victim+6]<<8)!=px ||
@@ -75,6 +78,7 @@ static void weapon_gravity_checks(const char *assets,const char *fixture,uint8 *
   w=MmxWeaponsGetState();w.page=2;w.weapon=6;MmxWeaponsSetState(w);g_ram[0x1f99]|=2;
   for(unsigned i=0;i<330;++i) frame(SNES_PAD_Y);frame(0);zero_replay(90);
   memcpy(g_ram+victim,enemy,64);
+  MmxBossRushSetOwner(victim,1);
   unsigned ex=(g_ram[0x1e4d]|g_ram[0x1e4e]<<8)+170,ey=(g_ram[0x1e50]|g_ram[0x1e51]<<8)+130;
   g_ram[victim+5]=(uint8_t)ex;g_ram[victim+6]=(uint8_t)(ex>>8);
   g_ram[victim+8]=(uint8_t)ey;g_ram[victim+9]=(uint8_t)(ey>>8);g_ram[victim+0x28]=6;

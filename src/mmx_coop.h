@@ -95,5 +95,8 @@ void MmxCoopRegisterHooks(void);
 void MmxCoopHostFrame(void);
 void MmxCoopLiftCarry(uint8_t *ram);
 void MmxCoopSyncPriority(uint8_t *ram);
+/* Rush's end-of-frame recovery for a hurt reaction interrupted by a refill
+ * or another player action. Includes the live body in solo mode. */
+void MmxCoopResumeHurtTimers(uint8_t *ram);
 /* End-of-frame hook for --coop-trace; no effect unless tracing. */
 void MmxCoopTraceFrame(const uint8_t ram[0x20000]);

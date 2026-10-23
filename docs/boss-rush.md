@@ -246,6 +246,20 @@ set `MMX_BOSS_RUSH_TEST=1` and pass the verified USA ROM to run the title-menu,
 28-pair entrance, replacement, 600-frame combat and snapshot-replay checks in
 an empty private working directory. Add `MMX_BOSS_RUSH_COOP=<private Zero asset
 file>` to run those checks in local co-op, including one-player and team deaths.
+`MMX_BOSS_RUSH_COOP_ISOLATION_TEST=1` checks real fatal boss contacts and damage
+to either survivor against all eight Mavericks. It separately restores an
+interrupted-hurt state after a partner death and verifies that the native
+protection countdown expires; active hurt, scripted locks, existing countdowns
+and charged Sting remain intact for both seats.
+Ordinary partner deaths did not reproduce the owner's report of permanent
+survivor invulnerability on current source. The interrupted-hurt state is
+explicitly seeded in its separate regression; recovery for the reported
+death-triggered issue remains tentative pending a capture or owner retest.
+`MMX_BOSS_RUSH_COOP_WEAPON_TEST=1` quick-switches both players through different
+native specials and fires normal and charged shots together. It checks private
+graphics for every visible projectile class and writes CSV traces and images.
+Both fixtures use the same co-op asset setting above; add
+`MMX_BOSS_RUSH_COOP_P1_ZERO=1` to exchange the two characters.
 `MMX_BOSS_RUSH_REPORT_TEST=1` checks issue #124: native death updates in both
 boss slots without permanent player protection, the retail subtank refill cap
 and empty-tank menu navigation, Penguin's native ice lock, and prolonged
@@ -465,3 +479,22 @@ distinguishes these layouts by their bounded tail lengths. The ROM-backed
 v19/v20, combined v21, file/memory imports and byte-exact immediate restoration.
 This format compatibility does not establish multiplayer compatibility between
 builds; the existing build identity checks remain in place.
+
+## Replacement spawns during weapon-menu entry (2026-10-22)
+
+A boss defeated as the native weapon menu opens could be replaced at X `$00C0`
+instead of inside the `$1E00` arena. The menu coroutine clears the live camera
+before publishing its menu flags; the replacement controller previously used
+that temporary camera as its spawn origin. The owner's slot 01 identified
+Spark Mandrill, already fighting at `$1093,$017A` after spawning outside.
+
+Replacement timers now wait for a stage scene and an arena camera. Entrance
+placement also bounds the camera to the encounter's saved origin/range. This
+works with expanded weapons disabled and preserves normal scrolling entrances.
+It does not clamp native boss attacks or change the renderer.
+
+The real-ROM `mmx_boss_rush_pause_spawn` test covers 90 pause offsets in each
+replacement slot. It drives native zero-HP death, checks the queued boss's first
+coordinates, closes the menu, and requires the native entrance to reach combat.
+The original failing timing and untouched owner save are retained privately;
+no native in-game save data is changed. Tracking: `beads-8wg.1.145`.

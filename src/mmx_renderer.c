@@ -1,4 +1,5 @@
 #include "mmx_renderer.h"
+#include "raster_snapshot.h"
 #include "mmx_display.h"
 #include "mmx_wide_policy.h"
 #include "mmx_render_assets.h"
@@ -19,19 +20,41 @@
  * presentation; this module never calls guest code or the PPU renderer. */
 typedef struct Raster {
   uint8_t registers[PPU_SAVESTATE_REGS_SIZE];
-  uint16_t palette[256], oam[256], vram[0x8000];
+  uint16_t palette[256], oam[256];
   uint8_t high_oam[32];
-  /* VRAM is copied only on the lines where the PPU wrote it since the line
-   * before (almost never mid-frame): every other line reads the copy held by
-   * frame.lines[vram_line]. -1 means this raster owns `vram` outright. */
-  int16_t vram_line;
+  const uint16_t *vram;
 } Raster;
+/* Storage is derived presentation data. Generic captures compare whole images;
+ * the title-owned hardware raster can additionally prove unchanged intervals
+ * using the existing port-write count. Every frame and IRQ starts uncertain.
+ * Never serialize these host pointers as simulation state. */
+static SnesRasterSnapshotStore vram_snapshots;
+static bool capture_failed;
+static const Ppu *hardware_raster_ppu;
+static uint32_t hardware_vram_writes;
+static bool hardware_vram_tracking, hardware_vram_uncertain;
+#ifndef MMX_RASTER_FULL_COPY
+#define MMX_RASTER_FULL_COPY 0
+#endif
+#ifndef MMX_STAGE_TILE_REUSE
+#define MMX_STAGE_TILE_REUSE 1
+#endif
+#if SNESRECOMP_TRACE
+#undef MMX_STAGE_TILE_REUSE
+#define MMX_STAGE_TILE_REUSE 0
+#endif
+#if MMX_STAGE_TILE_REUSE
+/* Rows are composed on several threads: each keeps its own cache, and a
+ * per-Draw generation invalidates every thread's entries at once. */
+static _Thread_local struct { unsigned generation, key; uint16_t entry; bool found; } stage_tile_cache[2];
+static unsigned stage_tile_generation;
+#endif
 static MmxBossRushState frame_rush;
 static MmxBossRushVisualState frame_rush_visual;
 typedef struct Piece {
   int16_t x, y; uint16_t attr; uint8_t size, animation;
-  /* Palette occupies bits 1..3; the five spare bits retain charged-shot
-   * pose 0..20 at submission, without changing the capture record size. */
+  /* Palette occupies bits 1..3; the five spare bits retain native-shot
+   * pose 0..31 at submission, without changing the capture record size. */
   uint8_t tile, palette_pose; uint16_t object;
 } Piece;
 static unsigned piece_pose(const Piece *p) {
@@ -79,9 +102,9 @@ static int view_camera(const uint8_t *r,unsigned address) {
 void MmxRendererHoldFrame(bool held) {frame_held=held;}
 static uint8_t partner_ram[0x20000];
 static Raster partner_raster;
-static inline const uint16_t *raster_vram(const Raster *r) {
-  return r->vram_line < 0 ? r->vram : frame.lines[r->vram_line].vram;
-}
+static uint16_t partner_vram[0x8000];
+/* Each raster points at an immutable shared VRAM image (vram_snapshots). */
+static inline const uint16_t *raster_vram(const Raster *r) { return r->vram; }
 static Piece building[MAX_PIECES], latched[MAX_PIECES];
 static unsigned building_count, latched_count;
 static uint8_t building_stage, latched_stage;
@@ -233,6 +256,8 @@ void MmxRendererReset(void) {
   frame_world_sprite_count = 0;
   frame_debug_rect_count = 0;
   frame.valid = false; frame.captured = 0;
+  capture_failed = false;
+  hardware_vram_tracking = false;
   building_count = latched_count = 0;
   building_stage = latched_stage = 0xff;
   expanded_building_count = expanded_latched_count = 0;
@@ -245,7 +270,7 @@ static Piece make_piece(const uint8_t *p, int x, int y, unsigned flip,
   y += flip & 0x80 ? -(int8_t)p[2] - size : (int8_t)p[2];
   unsigned attr = (((p[4] & 0xce) | attributes) ^ flip) << 8;
   attr |= (p[3] + base) & 255;
-  unsigned retained_pose=(animation==0x0e || animation==0x9e) ? pose&31 : 0;
+  unsigned retained_pose=object>=0x1228 && object<0x1428 ? pose&31 : 0;
   return (Piece){(int16_t)x, (int16_t)y, (uint16_t)attr, (uint8_t)size,
       (uint8_t)animation, p[3], (uint8_t)((p[4]&14)|(retained_pose&1)|((retained_pose&30)<<3)), (uint16_t)object};
 }
@@ -550,6 +575,8 @@ void MmxRendererBeginFrame(const uint8_t ram[0x20000]) {
            debug_rect_count * sizeof(*frame_debug_rects));
   trace_objects(ram);
   frame.valid = false; frame.captured = 0;
+  hardware_vram_tracking = false;
+  capture_failed = !SnesRasterSnapshotBegin(&vram_snapshots, 0x10000, 224);
   memcpy(frame.ram, ram, sizeof(frame.ram));
   frame_zero = MmxZeroGetState();
   frame_bounds=MmxCoopViewsGetBoundsState();
@@ -776,23 +803,44 @@ bool MmxRendererRidePilotFacingForTest(bool *native_hflip,
   *drawn_mirror = frame_player_overlay.facing_left;
   return true;
 }
+void MmxRendererBeginHardwareRaster(const Ppu *p) {
+  hardware_raster_ppu = p;
+  hardware_vram_writes = p ? p->vramWriteCount : 0;
+  hardware_vram_uncertain = true;
+  /* Trace commands can inject/restore arbitrary memory. Byte comparisons
+   * remain the reference there. Callback-owned VRAM is also never assumed. */
+#if SNESRECOMP_TRACE
+  hardware_vram_tracking = false;
+#else
+  hardware_vram_tracking = p && !p->widescreenLineEnhancer;
+#endif
+}
+void MmxRendererEndHardwareRaster(void) { hardware_vram_tracking = false; }
+void MmxRendererHardwareVramChanged(void) { hardware_vram_uncertain = true; }
 void MmxRendererCaptureLine(const Ppu *p, unsigned line) {
-  if (!p || line < 1 || line > 224 || line != frame.captured + 1) return;
+  if (!p || capture_failed || line < 1 || line > 224 || line != frame.captured + 1) return;
   Raster *r = &frame.lines[line - 1];
   memcpy(r->registers, p, sizeof(r->registers));
   memcpy(r->palette, p->cgram, sizeof(r->palette));
   memcpy(r->oam, p->oam, sizeof(r->oam));
   memcpy(r->high_oam, p->highOam, sizeof(r->high_oam));
-  /* Copying 64 KiB of VRAM for every one of 224 lines was ~15 MB of memcpy a
-   * frame -- the largest cost of the custom renderer on a Switch. */
-  static uint32_t s_vram_writes;
-  if (line == 1 || p->vramWriteCount != s_vram_writes || !g_mmx_render_fast_paths) {
-    memcpy(r->vram, p->vram, sizeof(r->vram));
-    r->vram_line = (int16_t)(line - 1);
-    s_vram_writes = p->vramWriteCount;
-  } else {
-    r->vram_line = frame.lines[line - 2].vram_line;
-  }
+  /* Only the title-owned scanline loop enables counter reuse. CPU execution
+   * (including native hooks) happens at IRQs, which explicitly invalidate it.
+   * HDMA stores go through the PPU ports and bump vramWriteCount. There cannot
+   * be 2^32 VRAM stores between adjacent hardware scanlines; wrapping once is
+   * fine. Direct/mock captures use exact byte comparisons instead. */
+  if (p != hardware_raster_ppu || p->widescreenLineEnhancer)
+    hardware_vram_tracking = false;
+  /* The renderer-mode debug hotkey turns reuse off as well. */
+  const bool full_copy = MMX_RASTER_FULL_COPY || !g_mmx_render_fast_paths;
+  if (!full_copy && hardware_vram_tracking && !hardware_vram_uncertain &&
+      frame.captured && hardware_vram_writes == p->vramWriteCount)
+    r->vram = vram_snapshots.images[vram_snapshots.count - 1];
+  else
+    r->vram = SnesRasterSnapshotCapture(&vram_snapshots, p->vram, !full_copy);
+  hardware_vram_writes = p->vramWriteCount;
+  hardware_vram_uncertain = false;
+  if (!r->vram) { capture_failed = true; return; }
   ++frame.captured;
 }
 /* Whether this frame's scene composes mode-1 lines itself: the per-frame half
@@ -816,11 +864,16 @@ bool MmxRendererCapturedLineIsCustom(const Ppu *ppu, unsigned line) {
   return s_scene_custom && (ppu->bgmode & 7) == 1;
 }
 bool MmxRendererEndFrame(const uint32_t stock[256 * 224]) {
-  if (!stock || frame.captured != 224) return false;
+  if (!stock || capture_failed || frame.captured != 224) return false;
   memcpy(frame.stock, stock, sizeof(frame.stock));
   return frame.valid = true;
 }
 MmxRenderStats MmxRendererGetStats(void) { return stats; }
+MmxRasterStats MmxRendererGetRasterStats(void) {
+  return (MmxRasterStats){vram_snapshots.copied_bytes,
+      vram_snapshots.allocated * vram_snapshots.image_bytes,
+      sizeof(frame), vram_snapshots.count, vram_snapshots.compared_bytes};
+}
 const uint32_t *MmxRendererStockFrame(void) { return frame.valid ? frame.stock : NULL; }
 void MmxRendererCoopFrame(const MmxCoopState *s) {
   if (!s || !s->initialized) { memset(&frame_coop,0,sizeof(frame_coop)); return; }
@@ -852,103 +905,110 @@ void MmxRendererCoopFrame(const MmxCoopState *s) {
       frame_partner_overlay=overlay;
   }
 }
+/* Capture files are build-specific. Version 24/25 records pointer-free frame
+ * metadata, image indices and only the distinct immutable VRAM images. */
 bool MmxRendererSaveCapture(const char *path) {
-  if (!frame.valid || !path) return false;
+  if (!frame.valid || !path || !vram_snapshots.count ||
+      vram_snapshots.image_bytes != 0x10000) return false;
+  uint16_t indices[224];
+  for (unsigned line = 0; line < 224; ++line) {
+    unsigned image = 0;
+    while (image < vram_snapshots.count &&
+           frame.lines[line].vram != vram_snapshots.images[image]) ++image;
+    if (image == vram_snapshots.count) return false;
+    indices[line] = (uint16_t)image;
+  }
+  Frame *saved = malloc(sizeof(*saved));
+  if (!saved) return false;
+  memcpy(saved, &frame, sizeof(*saved));
+  for (unsigned line = 0; line < 224; ++line) saved->lines[line].vram = NULL;
   FILE *f = fopen(path, "wb");
-  if (!f) return false;
-  uint32_t header[] = {0x4d4d5843, frame_coop.initialized ? 23 : 22,
-      sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat) +
-      (frame_coop.initialized ? sizeof(frame_coop) : 0) + sizeof(frame_rush) + sizeof(frame_rush_visual)+sizeof(frame_bounds)};
-  bool ok = fwrite(header, sizeof(header), 1, f) == 1 && fwrite(&frame, sizeof(frame), 1, f) == 1 &&
-      fwrite(&frame_zero, sizeof(frame_zero), 1, f) == 1 &&
+  if (!f) { free(saved); return false; }
+  uint32_t count = vram_snapshots.count;
+  uint32_t header[] = {0x4d4d5843, frame_coop.initialized ? 25 : 24,
+      (uint32_t)(sizeof(frame) + sizeof(count) + sizeof(indices) + count * 0x10000u +
+      sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat) +
+      (frame_coop.initialized ? sizeof(frame_coop) : 0) + sizeof(frame_rush) +
+      sizeof(frame_rush_visual) + sizeof(frame_bounds))};
+  bool ok = fwrite(header, sizeof(header), 1, f) == 1 &&
+      fwrite(saved, sizeof(*saved), 1, f) == 1 &&
+      fwrite(&count, sizeof(count), 1, f) == 1 &&
+      fwrite(indices, sizeof(indices), 1, f) == 1;
+  free(saved);
+  for (unsigned image = 0; ok && image < count; ++image)
+    ok = fwrite(vram_snapshots.images[image], 0x10000, 1, f) == 1;
+  if (ok) ok = fwrite(&frame_zero, sizeof(frame_zero), 1, f) == 1 &&
       fwrite(&frame_weapons, sizeof(frame_weapons), 1, f) == 1 &&
       fwrite(&frame_weapon_combat, sizeof(frame_weapon_combat), 1, f) == 1;
-  if (ok && frame_coop.initialized) ok = fwrite(&frame_coop,sizeof(frame_coop),1,f) == 1;
-  if(ok) ok=fwrite(&frame_rush,sizeof(frame_rush),1,f)==1;
-  if(ok) ok=fwrite(&frame_rush_visual,sizeof(frame_rush_visual),1,f)==1;
-  if(ok) ok=fwrite(&frame_bounds,sizeof(frame_bounds),1,f)==1;
+  if (ok && frame_coop.initialized) ok = fwrite(&frame_coop, sizeof(frame_coop), 1, f) == 1;
+  if (ok) ok = fwrite(&frame_rush, sizeof(frame_rush), 1, f) == 1 &&
+      fwrite(&frame_rush_visual, sizeof(frame_rush_visual), 1, f) == 1 &&
+      fwrite(&frame_bounds, sizeof(frame_bounds), 1, f) == 1;
   return fclose(f) == 0 && ok;
 }
 bool MmxRendererLoadCapture(const char *path) {
   if (!path) return false;
   FILE *f = fopen(path, "rb");
   if (!f) return false;
-  uint32_t h[3] = {0};
+  uint32_t h[3] = {0}, count = 0;
+  uint16_t indices[224];
   frame.valid = false;
   reset_pilot_overlay_alignment();
   memset(&frame_zero, 0, sizeof(frame_zero));
   memset(&frame_weapons, 0, sizeof(frame_weapons));
   memset(&frame_weapon_combat, 0, sizeof(frame_weapon_combat));
-  memset(&frame_coop,0,sizeof(frame_coop));
-  memset(&frame_bounds,0,sizeof(frame_bounds));
-  memset(&frame_rush,0,sizeof(frame_rush));
-  memset(&frame_rush_visual,0,sizeof(frame_rush_visual));
+  memset(&frame_coop, 0, sizeof(frame_coop));
+  memset(&frame_bounds, 0, sizeof(frame_bounds));
+  memset(&frame_rush, 0, sizeof(frame_rush));
+  memset(&frame_rush_visual, 0, sizeof(frame_rush_visual));
   bool ok = fread(h, sizeof(h), 1, f) == 1 && h[0] == 0x4d4d5843 &&
-      ((h[1] == 2 && h[2] == sizeof(frame)) || (h[1] == 3 && h[2] == sizeof(frame) + MMX_ZERO_LEGACY_STATE_SIZE) ||
-       (h[1] == 4 && h[2] == sizeof(frame) + MMX_ZERO_ANIMATION_STATE_SIZE) ||
-       (h[1] == 5 && h[2] == sizeof(frame) + MMX_ZERO_COMBAT_STATE_SIZE) ||
-       (h[1] == 6 && h[2] == sizeof(frame) + MMX_ZERO_SWAP_STATE_SIZE) ||
-       (h[1] == 7 && h[2] == sizeof(frame) + MMX_ZERO_HEALTH_STATE_SIZE) ||
-       (h[1] == 8 && h[2] == sizeof(frame) + MMX_ZERO_HEALTH_STATE_SIZE + MMX_WEAPONS_LEGACY_STATE_SIZE) ||
-       (h[1] == 9 && h[2] == sizeof(frame) + MMX_ZERO_HEALTH_STATE_SIZE + MMX_WEAPONS_LEGACY_STATE_SIZE + MMX_WEAPON_COMBAT_LEGACY_SIZE) ||
-       (h[1] == 10 && h[2] == sizeof(frame) + MMX_ZERO_HEALTH_STATE_SIZE + sizeof(frame_weapons) + MMX_WEAPON_COMBAT_LEGACY_SIZE) ||
-       (h[1] == 11 && h[2] == sizeof(frame) + MMX_ZERO_HEALTH_STATE_SIZE + sizeof(frame_weapons) + MMX_WEAPON_COMBAT_DAMAGE_SIZE) ||
-       (h[1] == 12 && h[2] == sizeof(frame) + MMX_ZERO_HEALTH_STATE_SIZE + sizeof(frame_weapons) + sizeof(frame_weapon_combat)) ||
-       (h[1] == 13 && h[2] == sizeof(frame) + MMX_ZERO_HEALTH_STATE_SIZE + sizeof(frame_weapons) + sizeof(frame_weapon_combat) + MMX_COOP_LEGACY_STATE_SIZE) ||
-       (h[1] == 14 && h[2] == sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat)) ||
-       ((h[1] == 15 || h[1] == 17) && h[2] == sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat) + sizeof(frame_coop)) ||
-       (h[1] == 16 && h[2] == sizeof(frame) + sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat)) ||
-       ((h[1]>=18 && h[1]<=23) && h[2]==sizeof(frame)+sizeof(frame_zero)+sizeof(frame_weapons)+sizeof(frame_weapon_combat)+sizeof(frame_rush)+((h[1]&1)?sizeof(frame_coop):0)+(h[1]>=20?sizeof(frame_rush_visual):0)+(h[1]>=22?sizeof(frame_bounds):0))) &&
-      fread(&frame, sizeof(frame), 1, f) == 1 &&
-      frame.captured == 224 && frame.piece_count <= MAX_PIECES && frame.expanded_count <= MAX_PIECES && frame.valid;
-  size_t zero_size = h[1] == 3 ? MMX_ZERO_LEGACY_STATE_SIZE :
-      h[1] == 4 ? MMX_ZERO_ANIMATION_STATE_SIZE :
-      h[1] == 5 ? MMX_ZERO_COMBAT_STATE_SIZE :
-      h[1] == 6 ? MMX_ZERO_SWAP_STATE_SIZE : h[1] < 14 ? MMX_ZERO_HEALTH_STATE_SIZE : sizeof(frame_zero);
-  if (ok && h[1] >= 3) ok = fread(&frame_zero, zero_size, 1, f) == 1 &&
-      frame_zero.active_x <= 1 && frame_zero.swap_phase <= 6 && frame_zero.swap_tick <= 30 &&
-      frame_zero.swap_y >= -320 && frame_zero.swap_y <= 0 &&
-      frame_zero.slash <= 46 && frame_zero.air <= 1 && frame_zero.anim_valid <= 1 && frame_zero.anim_pose < 117 &&
-      frame_zero.burst <= 2 && (!frame_zero.burst || (frame_zero.burst_offset >= 272 &&
-        frame_zero.burst_offset + 3 <= MMX_ZERO_ANIMATION_BYTES && frame_zero.burst_timer));
-  if (ok && h[1] >= 8) ok = fread(&frame_weapons, h[1] >= 10 ? sizeof(frame_weapons) : MMX_WEAPONS_LEGACY_STATE_SIZE, 1, f) == 1 &&
-      MmxWeaponsValidState(&frame_weapons);
-  if (ok && h[1] >= 9) ok = fread(&frame_weapon_combat,
-      h[1]>=12 ? sizeof(frame_weapon_combat) : h[1]==11 ? MMX_WEAPON_COMBAT_DAMAGE_SIZE : MMX_WEAPON_COMBAT_LEGACY_SIZE, 1, f) == 1 &&
+      (h[1] == 24 || h[1] == 25) && fread(&frame, sizeof(frame), 1, f) == 1;
+  const bool valid = true;
+  ok = ok && !memcmp(&frame.valid, &valid, sizeof(valid)) &&
+      frame.captured == 224 && frame.piece_count <= MAX_PIECES && frame.expanded_count <= MAX_PIECES;
+  frame.valid = false;
+  /* File bytes never become usable host pointers, including on failure. */
+  for (unsigned line = 0; line < 224; ++line) frame.lines[line].vram = NULL;
+  ok = ok && fread(&count, sizeof(count), 1, f) == 1 && count && count <= 224 &&
+      h[2] == sizeof(frame) + sizeof(count) + sizeof(indices) + count * 0x10000u +
+      sizeof(frame_zero) + sizeof(frame_weapons) + sizeof(frame_weapon_combat) +
+      (h[1] == 25 ? sizeof(frame_coop) : 0) + sizeof(frame_rush) +
+      sizeof(frame_rush_visual) + sizeof(frame_bounds) &&
+      fread(indices, sizeof(indices), 1, f) == 1;
+  for (unsigned line = 0; ok && line < 224; ++line) ok = indices[line] < count;
+  uint16_t *source = ok ? malloc(0x10000) : NULL;
+  ok = ok && source && SnesRasterSnapshotBegin(&vram_snapshots, 0x10000, 224);
+  for (unsigned image = 0; ok && image < count; ++image)
+    ok = fread(source, 0x10000, 1, f) == 1 &&
+        SnesRasterSnapshotCapture(&vram_snapshots, source, false) != NULL;
+  free(source);
+  if (ok) ok = fread(&frame_zero, sizeof(frame_zero), 1, f) == 1 && MmxZeroValidState(&frame_zero) &&
+      fread(&frame_weapons, sizeof(frame_weapons), 1, f) == 1 && MmxWeaponsValidState(&frame_weapons) &&
+      fread(&frame_weapon_combat, sizeof(frame_weapon_combat), 1, f) == 1 &&
       MmxWeaponsValidCombatState(&frame_weapon_combat);
-  if (ok && h[1]<16) {
-    /* Older captures only kept palette bits. Use their saved pose as the
-     * best available approximation; all new captures retain submission. */
-    for (unsigned list=0;list<2;++list) {
-      Piece *pieces=list ? frame.expanded : frame.pieces;
-      unsigned count=list ? frame.expanded_count : frame.piece_count;
-      for (unsigned i=0;i<count;++i) {
-        Piece *p=&pieces[i];
-        if ((p->animation==0x0e || p->animation==0x9e) && p->object<0x1fe0) {
-          unsigned pose=frame.ram[p->object+23]&31;
-          p->palette_pose=(p->palette_pose&14)|(pose&1)|((pose&30)<<3);
-        }
-      }
-    }
+  if (ok && h[1] == 25) {
+    ok = fread(&frame_coop, sizeof(frame_coop), 1, f) == 1 &&
+        frame_coop.initialized == 1 && frame_coop.current < 2;
+    for (unsigned i = 0; ok && i < 2; ++i) ok =
+        frame_coop.players[i].character <= MMX_COOP_ZERO &&
+        frame_coop.players[i].status <= MMX_COOP_FALLEN &&
+        MmxZeroValidState(&frame_coop.players[i].zero) &&
+        MmxWeaponsValidState(&frame_coop.players[i].weapons) &&
+        MmxWeaponsValidCombatState(&frame_coop.players[i].combat);
   }
-  if (ok && (h[1] == 13 || h[1] == 15 || h[1] == 17 || h[1]==19 || h[1]==21 || h[1]==23)) {
-    MmxCoopState coop;
-    if (h[1] == 13) {
-      uint8_t legacy[MMX_COOP_LEGACY_STATE_SIZE];
-      ok = fread(legacy,sizeof(legacy),1,f) == 1;
-      if (ok) MmxCoopImportLegacy(&coop,legacy);
-    } else ok = fread(&coop,sizeof(coop),1,f) == 1;
-    ok = ok && coop.initialized == 1;
-    for (unsigned i=0;ok && i<2;++i) ok = coop.players[i].character <= MMX_COOP_ZERO &&
-        coop.players[i].status <= MMX_COOP_FALLEN && MmxZeroValidState(&coop.players[i].zero) &&
-        MmxWeaponsValidState(&coop.players[i].weapons) && MmxWeaponsValidCombatState(&coop.players[i].combat);
-    if (ok) MmxRendererCoopFrame(&coop);
+  if (ok) ok = fread(&frame_rush, sizeof(frame_rush), 1, f) == 1 && MmxBossRushValidState(&frame_rush) &&
+      fread(&frame_rush_visual, sizeof(frame_rush_visual), 1, f) == 1 && MmxBossRushVisualValidState(&frame_rush_visual) &&
+      fread(&frame_bounds, sizeof(frame_bounds), 1, f) == 1 && MmxCoopViewsValidBoundsState(&frame_bounds) &&
+      fgetc(f) == EOF;
+  fclose(f);
+  if (ok) {
+    for (unsigned line = 0; line < 224; ++line)
+      frame.lines[line].vram = vram_snapshots.images[indices[line]];
+    if (frame_coop.initialized) { MmxCoopState coop = frame_coop; MmxRendererCoopFrame(&coop); }
   }
-  if(ok && h[1]>=18) ok=fread(&frame_rush,sizeof(frame_rush),1,f)==1 && MmxBossRushValidState(&frame_rush);
-  if(ok && h[1]>=20) ok=fread(&frame_rush_visual,sizeof(frame_rush_visual),1,f)==1 && MmxBossRushVisualValidState(&frame_rush_visual);
-  if(ok && h[1]>=22) ok=fread(&frame_bounds,sizeof(frame_bounds),1,f)==1 && MmxCoopViewsValidBoundsState(&frame_bounds);
-  ok = ok && fgetc(f) == EOF;
-  fclose(f); frame.valid = ok; return ok;
+  frame.valid = ok;
+  if (!ok) frame.captured = 0;
+  return ok;
 }
 
 bool MmxRendererStageTile(const uint8_t ram[0x20000], unsigned layer,
@@ -965,6 +1025,26 @@ bool MmxRendererStageTile(const uint8_t ram[0x20000], unsigned layer,
   const uint8_t *tile = rom_at(address, 2);
   if (!tile) return false;
   *entry = (uint16_t)word(tile, 0); return true;
+}
+static bool stage_tile_for_draw(unsigned layer, int x, int y, uint16_t *entry) {
+#if MMX_STAGE_TILE_REUSE
+  if (layer > 1 || x < 0 || y < 0 || x >= 8192 || y >= 8192) return false;
+  /* The reference ignores the low three coordinate bits. frame.ram is
+   * immutable during a draw; reset the keys at every Draw, including after
+   * load, a view change or an edit to the external ROM. No live RAM cache. */
+  unsigned key = ((unsigned)y >> 3) * 1024 + ((unsigned)x >> 3);
+  if (stage_tile_cache[layer].key != key ||
+      stage_tile_cache[layer].generation != stage_tile_generation) {
+    stage_tile_cache[layer].key = key;
+    stage_tile_cache[layer].generation = stage_tile_generation;
+    stage_tile_cache[layer].found = MmxRendererStageTile(frame.ram, layer, x, y,
+        &stage_tile_cache[layer].entry);
+  }
+  if (stage_tile_cache[layer].found) *entry = stage_tile_cache[layer].entry;
+  return stage_tile_cache[layer].found;
+#else
+  return MmxRendererStageTile(frame.ram, layer, x, y, entry);
+#endif
 }
 static bool door_body(int x, int y) {
   if (x < 0 || y < 0 || x >= 8192 || y >= 8192) return false;
@@ -1279,7 +1359,7 @@ static uint16_t background(const Ppu *p, const Raster *r, unsigned layer, int x,
       }
     }
     uint16_t mapped;
-    if (MmxRendererStageTile(frame.ram, layer, wx, wy, &mapped)) {
+    if (stage_tile_for_draw(layer, wx, wy, &mapped)) {
       tile = mapped; px = wx; py = wy;
       /* These backdrops move at half speed. Express the map column as the player
        * X at which it crosses the native view's center (camera+128). */
@@ -1639,8 +1719,10 @@ static void prepare_partner_graphics(void) {
    * captured state, including WRAM-backed armor/effects, and changes no guest
    * memory, transfer timing, or save/rollback layout. */
   partner_raster = frame.lines[0];
-  /* Line 1 always owns its VRAM copy; the partner edits its own. */
-  partner_raster.vram_line = -1;
+  /* Partner pose previews may patch CHR. Keep their writable image separate
+   * from the shared immutable scanline images. */
+  memcpy(partner_vram, partner_raster.vram, sizeof(partner_vram));
+  partner_raster.vram = partner_vram;
   unsigned end = frame.ram[0xa3] & ~7u;
   for (unsigned offset=0;offset<end;offset+=8) {
     const uint8_t *dma=frame.ram+0x500+offset;
@@ -1652,7 +1734,7 @@ static void prepare_partner_graphics(void) {
     const uint8_t *bytes=bank==0x7e || bank==0x7f ?
         frame.ram+(bank-0x7e)*0x10000+source : rom_at(bank<<16|source,size);
     if(!bytes) continue;
-    for(unsigned i=0;i<size;i+=2) partner_raster.vram[dest+i/2]=(uint16_t)word(bytes,i);
+    for(unsigned i=0;i<size;i+=2) partner_vram[dest+i/2]=(uint16_t)word(bytes,i);
   }
 }
 static void player_overlay_plane_row(
@@ -1768,16 +1850,17 @@ static void coop_partner_row(const Ppu *ppu,const Raster *r,int y,MmxRenderView 
       Piece s = make_piece(a+j*4,x,sy,ram[d+17]&64,ram[d+17]&63,ram[d+24],group,d,ram[d+23]&127);
       const MmxSpriteAsset *asset=!zero && weapon_colors && zero_actor(d,group) &&
           (s.attr&0x0e00) ? &weapon_palette : NULL;
-      /* Normal Spark and its two wall fragments share original group $47.
-       * Another seat can replace the shared $6200/$6300 weapon upload. */
-      if(d>=0x1228 && ram[d+10]==0x0c && group==0x47 && (s.attr&0x0e00)==0x0600)
-        asset=MmxRenderAssetsWeaponX(6,false);
+      unsigned tile=s.tile;
+      if(d>=0x1228) {
+        const MmxSpriteAsset *shot=MmxRenderAssetsNativeShot(ram,d,group,ram[d+23]&127,frame_coop.current^1);
+        if(shot) {asset=shot;tile=s.attr&255;}
+      }
       if(d>=0x1228 && ((ram[d+10]==3 && group==0x9e) ||
           ((ram[d+10]==1 || ram[d+10]==2) && group==0x0e))) {
         const MmxSpriteAsset *beam=MmxRenderAssetsChargedBuster(group,ram[d+23]&127);
         if(beam) asset=beam;
       }
-      sprite(ppu,zero?r:&partner_raster,s.x,s.y,s.attr,s.size,y,view,objects,false,asset,s.tile,colors,true,false,false);
+      sprite(ppu,zero?r:&partner_raster,s.x,s.y,s.attr,s.size,y,view,objects,false,asset,tile,colors,true,false,false);
     }
   }
 }
@@ -2122,6 +2205,10 @@ static void draw_row(const DrawCtx *c, int y) {
     bool coop_buster=stage && frame_coop.initialized && s.object>=0x1228 && s.object<0x1428 &&
         ((frame.ram[s.object+10]==3 && s.animation==0x9e) ||
          ((frame.ram[s.object+10]==1 || frame.ram[s.object+10]==2) && s.animation==0x0e));
+    const MmxSpriteAsset *coop_special=stage && frame_coop.initialized &&
+        s.object>=0x1228 && s.object<0x1428 &&
+        !frame_weapon_combat.shots[(s.object-0x1228)/64].active ?
+        MmxRenderAssetsNativeShot(frame.ram,s.object,s.animation,piece_pose(&s),frame_coop.current) : NULL;
     bool menu_body = s.object == 0x1988 && (s.animation == 0 || s.animation == 0x18);
     bool zero_body = zero && (s.object == 0xba8 || menu_body);
     bool triad_x_body=cast_body && !zero && s.object==0xba8;
@@ -2132,7 +2219,7 @@ static void draw_row(const DrawCtx *c, int y) {
     bool zero_armor = zero && (s.object == 0xc38 || s.object == 0xc58 || s.object == 0xc78 ||
         (zero_menu && (s.object == 0x1928 || s.object == 0x1948 || s.object == 0x1968)));
     bool oam_match = false;
-    if (g_mmx_render_asset_repairs || coop_buster || zero_body || zero_armor || zero_charge || swap_actor || red_ready || red_death || triad_x_body || triad_armor || frozen_enemy) {
+    if (g_mmx_render_asset_repairs || coop_buster || coop_special || zero_body || zero_armor || zero_charge || swap_actor || red_ready || red_death || triad_x_body || triad_armor || frozen_enemy) {
       if (oam_is_reference) {
         /* Same OAM as the frame's first line: the match was found once. */
         if (c->piece_oam_match[i]) {
@@ -2270,14 +2357,13 @@ static void draw_row(const DrawCtx *c, int y) {
      * the boots. */
     if ((frame_zero.active_x || knc_bugfix) && weapon_colors && zero_actor(s.object, s.animation) &&
         (menu || ((attr & 0x0e00) == 0x0200 && (!x_charging(frame.ram) || knc_bugfix)))) asset = &x_weapon_palette;
-    if(stage && frame_coop.initialized && s.object>=0x1228 && s.object<0x1428 &&
-        frame.ram[s.object+10]==0x0c && s.animation==0x47 && (s.attr&0x0e00)==0x0600)
-      asset=MmxRenderAssetsWeaponX(6,false);
+    if(coop_special) asset=coop_special;
     if(coop_buster) {
       const MmxSpriteAsset *beam=MmxRenderAssetsChargedBuster(s.animation,piece_pose(&s));
       if(beam) asset=beam;
     }
-    sprite(&p, r, s.x, s.y, attr, s.size, y, view, objects, !center, asset, s.tile, object_colors, true, false, red_ready || red_death);
+    sprite(&p, r, s.x, s.y, attr, s.size, y, view, objects, !center, asset,
+        coop_special?s.attr&255:s.tile, object_colors, true, false, red_ready || red_death);
   }
   if (stage) coop_partner_row(&p,r,y,view,objects,object_colors);
   int bar_first = -1, bar_count = 0;
@@ -2543,6 +2629,9 @@ bool MmxRendererDraw(uint32_t *out, MmxRenderView view, bool hud) {
   if (!out || !frame.valid || view.width < 256 || view.width > MMX_RENDER_MAX_WIDTH ||
       view.extra != (view.width - 256) / 2 || (view.width & 1)) return false;
   memset(&stats, 0, sizeof(stats)); stats.pieces = frame.piece_count;
+#if MMX_STAGE_TILE_REUSE
+  ++stage_tile_generation;
+#endif
   memset(door_cache, 0, sizeof(door_cache));
   memset(out, 0, (size_t)view.width * 224 * sizeof(*out));
   if(frame_rush.mode==MMX_RUSH_FINISHED) {

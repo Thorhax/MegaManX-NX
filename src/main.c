@@ -295,6 +295,76 @@ static void MmxConfigureCoopTrace(int *argc, char **argv) {
   MmxCoopTraceConfigure(MmxCoopTraceValue(chosen));
 }
 
+/* Every Mega Man X-series SNES dump a player is likely to pick, so a refused
+ * ROM is named ("This is Mega Man X (USA) v1.0. Mega Man X needs Mega Man X
+ * (USA) v1.1 (Rev 1) ...") instead of only "not recognized". SHA-1 and CRC32
+ * are No-Intro's (libretro-database, DAT 2026.10.07); SHA-256 is given only
+ * where this project verified it against a real dump. The build's own ROM is
+ * the entry whose SHA-256 is expected_sha256_hex; the X2/X3 USA entries also
+ * name the files the Mods source-ROM pickers ask for. */
+#define MMX_COLLECTION_NOTE "Collection re-releases are not byte-identical to the cartridge; use a cartridge dump."
+#if MMX_VARIANT_JP
+#define MMX_X1_NOTE "This build is the Japanese Rockman X; Mega Man X dumps have different code."
+#define MMX_X2_NOTE "That is a different game (X2)."
+#define MMX_X3_NOTE "That is a different game (X3)."
+#else
+#define MMX_X1_NOTE "v1.0 is the first printing and v1.1 (Rev 1) a later one with different code, so they are not interchangeable."
+#define MMX_X2_NOTE "That is Mega Man X2. X2 weapons take it under Mods; the game ROM itself must be Mega Man X."
+#define MMX_X3_NOTE "That is Mega Man X3. Zero, co-op and X3 weapons take it under Mods; the game ROM itself must be Mega Man X."
+#endif
+static const SnesRomRevision kMmxRomCatalog[] = {
+  {"Mega Man X (USA) v1.1 (Rev 1)",
+   "b8f70a6e7fb93819f79693578887e2c11e196bdf1ac6ddc7cb924b1ad0be2d32",
+   "c65216760ba99178100a10d98457cf11496c2097", "DED53C64", NULL},
+  {"Mega Man X (USA) v1.0", NULL,
+   "449a00631208fbcc8d58209e66d0d488674b7fb1", "1033EBA4", MMX_X1_NOTE},
+  {"Mega Man X (Europe)", NULL,
+   "8a32570fad3bfc92c0508c88022fb20412dd7bed", "41965122",
+   "The European release is a PAL version with different code and timing."},
+  {"Rockman X (Japan) v1.1 (Rev 1)",
+   "76f80cdf704a0e1daf1af5bbf564e427b425a5ee42329417de6f29219fe63e5f",
+   "03f8f99d27874465f8d3e5ec9628927ac5be6fae", "5584641E", NULL},
+  {"Rockman X (Japan) v1.0", NULL,
+   "86c18ba1fc762b6d0bcdee7314a29b5c97cac082", "6A1B6926",
+   "v1.0 is the first Japanese printing; v1.1 (Rev 1) has different code."},
+  {"Mega Man X (Legacy Collection extract)", NULL,
+   "14aa83cd2eafad1a9b04187a854e20b33cefc207", "97A10846", MMX_COLLECTION_NOTE},
+  {"Rockman X (Legacy Collection extract)", NULL,
+   "67cc4bc4c9f23532d72d188ef96b431d3baed401", "94CA42BF", MMX_COLLECTION_NOTE},
+  {"Mega Man X (USA) (Mega Man X Collection extract)", NULL,
+   "df62ec045c78e9b9184e7c35c9bc3bb8de28afde", "FA542E48", MMX_COLLECTION_NOTE},
+  {"Mega Man X (USA) (Capcom Town)", NULL,
+   "f43c28fff43a9ee73ea1e01c3cbe8ebfd40f6209", "A7689FC4", MMX_COLLECTION_NOTE},
+  {"Mega Man X2 (USA)",
+   "f3246755f608a1e1dc9c848b61da3b824c7853b29b3be40df6fc7f2793a887ed",
+   "637079014421563283cded6aeaa0604597b2e33c", "947B0355", MMX_X2_NOTE},
+  {"Mega Man X2 (Europe)", NULL,
+   "5c767285da713de2bc883a6291d32adc9b2d13fa", "3C49C39C", MMX_X2_NOTE},
+  {"Rockman X2 (Japan)", NULL,
+   "34dc37c8a1905ec5631fa666eba84bb78f9c5bdf", "299D7A89", MMX_X2_NOTE},
+  {"Mega Man X2 (Legacy Collection extract)", NULL,
+   "4a57802a0ad3817daf1ff60d62e094b0612b5612", "8972DF65", MMX_X2_NOTE},
+  {"Rockman X2 (Legacy Collection extract)", NULL,
+   "44431b4489bd3726b220d9a879df0a267c57cf2a", "011E5068", MMX_X2_NOTE},
+  {"Mega Man X2 (USA) (Mega Man X Collection extract)", NULL,
+   "9ee80aff5fdb8dff7eb44b33fda856a4a538bda5", "B8600893", MMX_X2_NOTE},
+  {"Mega Man X3 (USA)",
+   "65b03268afac296330e8ff8d60dd0825879e13ed658b37713c034a3bd074f1d7",
+   "b226f7ec59283b05c1e276e2f433893f45027cac", "FA0FE671", MMX_X3_NOTE},
+  {"Mega Man X3 (Europe)", NULL,
+   "69a11324aeb57d005800771d6147603d5479b282", "C504DDFD", MMX_X3_NOTE},
+  {"Rockman X3 (Japan)", NULL,
+   "8e0156fc7d6af6f36b08a5e399c0284c6c5d81b8", "E476912B", MMX_X3_NOTE},
+  {"Mega Man X3 (Legacy Collection extract)", NULL,
+   "e1259c1bbd8cef0769f193d8eec83536bd15e4d0", "1ACB643D", MMX_X3_NOTE},
+  {"Rockman X3 (Legacy Collection extract)", NULL,
+   "10b62c6cde8ea29e60b409dc357690dd83811c2e", "741AB27B", MMX_X3_NOTE},
+};
+#undef MMX_X1_NOTE
+#undef MMX_COLLECTION_NOTE
+#undef MMX_X2_NOTE
+#undef MMX_X3_NOTE
+
 int MMX_DESKTOP_ENTRY(int argc, char **argv) {
   MmxStartupLogging();
   for(int arg=1;arg+1<argc;++arg)
@@ -334,13 +404,20 @@ int MMX_DESKTOP_ENTRY(int argc, char **argv) {
     .rom_file = "rockmanx.sfc",
     .expected_crc32_hex = "5584641E",
     .expected_sha256_hex = "76f80cdf704a0e1daf1af5bbf564e427b425a5ee42329417de6f29219fe63e5f",
+    .rom_help = "Look for \"Rockman X (Japan) (Rev 1)\". Headered and "
+                "headerless copies both work; patched ROMs do not.",
 #else
     .display_name = "Mega Man X", .region = "USA",
     .num_players = 2,
     .rom_file = "mmx.sfc", .game_id = "megaman-x-us",
     .expected_crc32_hex = "DED53C64",
     .expected_sha256_hex = "b8f70a6e7fb93819f79693578887e2c11e196bdf1ac6ddc7cb924b1ad0be2d32",
+    .rom_help = "Look for \"Mega Man X (USA) (Rev 1)\". Headered and "
+                "headerless copies both work; patched ROMs (MSU-1, hacks) do "
+                "not, as Mods adds those.",
 #endif
+    .rom_revisions = kMmxRomCatalog,
+    .num_rom_revisions = (int)(sizeof(kMmxRomCatalog) / sizeof(kMmxRomCatalog[0])),
     .build_version = SNESRECOMP_BUILD_VERSION,
     .game_info = &mmx_game_info,
     .default_config_ini = kMmxDefaultConfig,

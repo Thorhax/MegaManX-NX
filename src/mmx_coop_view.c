@@ -40,6 +40,7 @@ void MmxCoopViewsMark(unsigned flag,bool seen) {
 void MmxCoopViewsSetOnline(bool active) { online=active; }
 bool MmxCoopViewsOnline(void) { return online; }
 static int word(const uint8_t *r) { return r[0]|r[1]<<8; }
+static void putword(uint8_t *r,unsigned value) {r[0]=(uint8_t)value;r[1]=(uint8_t)(value>>8);}
 static int clamp(int v,int lo,int hi) { if(hi<lo) hi=lo;return v<lo?lo:v>hi?hi:v; }
 static bool living(const MmxCoopPlayer *p) {
   return p->status==MMX_COOP_ALIVE && (p->body[0x27]&127) && p->body[2]!=12;
@@ -130,6 +131,26 @@ MmxCoopView MmxCoopViewWithBounds(const uint8_t *r,const MmxCoopState *s,unsigne
 }
 MmxCoopView MmxCoopViewForPlayer(const uint8_t *r,const MmxCoopState *s,unsigned seat) {
   return MmxCoopViewWithBounds(r,s,seat,&bounds);
+}
+void MmxCoopViewsAdoptPlayer(uint8_t *r,const MmxCoopState *s,unsigned seat) {
+  if(!online || !s->initialized || seat>1 || seat==s->anchor || s->scene_owner ||
+      s->stage_pending || r[0xd3]!=4 || bounds.stage!=r[0x1f7a] ||
+      !(bounds.valid&(1u<<seat)) || !living(&s->players[seat]) ||
+      s->players[seat].zero.swap_phase) return;
+  MmxCoopView v=MmxCoopViewForPlayer(r,s,seat);
+  /* Sigma 1's upper door ($81:EC98) can be reached while the world actor
+   * is still at the shaft bottom. Once the door freezes gameplay, native
+   * scrolling must start from its entrant's view and room limits; keeping
+   * the lower actor's camera leaves the door waiting forever. Copy both
+   * current and target limits, plus the camera's previous-position pair,
+   * before the caller changes the anchor and begins scene transport. */
+  static const unsigned targets[4]={0x1e5e,0x1e60,0x1e68,0x1e6e};
+  for(unsigned i=0;i<4;++i) {
+    putword(r+0x1e56+i*2,bounds.limits[seat][i]);
+    putword(r+targets[i],bounds.limits[seat][i]);
+  }
+  putword(r+0x1e4d,(unsigned)v.x);putword(r+0x1e6a,(unsigned)v.x);
+  putword(r+0x1e50,(unsigned)v.y);putword(r+0x1e6c,(unsigned)v.y);
 }
 bool MmxCoopViewContains(const uint8_t *r,const MmxCoopState *s,int x,int y,
                          int left,int right,int top,int bottom,int margin) {

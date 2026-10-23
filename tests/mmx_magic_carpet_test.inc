@@ -115,5 +115,22 @@ static void magic_carpet_checks(const char *path,uint8 *start,uint8 *expected,ui
   check(RtlLoadSnapshotFromMemory(start,active_size),"active carpet snapshot restores again");
   carpet_frames(30,SNES_PAD_RIGHT);size_t an=RtlSaveSnapshotToMemory(actual,cap);
   same(expected,en,actual,an,"active carpet replays deterministically");
+  if(getenv("MMX_RASTER_INVARIANTS")) {
+    check(RtlRollbackSnapshotBound()<=cap,"rollback invariant buffers fit");
+    en=RtlRollbackSaveToMemory(expected,cap);
+    uint64_t clocks=g_cpu.master_cycles;
+    static uint32_t pixels[MMX_RENDER_MAX_WIDTH*224];
+    const MmxRenderView views[]={{256,0,4.0/3.0},{682,213,32.0/9.0},{342,43,16.0/9.0}};
+    for(unsigned repeat=0;repeat<2;++repeat) for(unsigned v=0;v<3;++v)
+      check(MmxRendererDraw(pixels,views[(v+repeat)%3],repeat!=0),"repeated render at another width succeeds");
+    an=RtlRollbackSaveToMemory(actual,cap);
+    same(expected,en,actual,an,"render count and view width leave complete rollback state unchanged");
+    check(g_cpu.master_cycles==clocks,"rendering consumes no guest clocks");
+  }
+  MmxRasterStats raster=MmxRendererGetRasterStats();
+  printf("MMX_RASTER_STATS {\"images\":%u,\"copied_bytes\":%llu,\"allocated_bytes\":%zu,\"metadata_bytes\":%zu,\"compared_bytes\":%llu}\n",
+      raster.vram_images,(unsigned long long)raster.vram_copied_bytes,
+      raster.vram_allocated_bytes,raster.frame_metadata_bytes,
+      (unsigned long long)raster.vram_compared_bytes);
   puts("MMX MAGIC CARPET CHECKS PASSED");
 }

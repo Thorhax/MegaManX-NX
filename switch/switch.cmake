@@ -17,7 +17,15 @@ option(MMX_SWITCH_LAUNCHER "Include the Dear ImGui launcher (Mods, Controls, Set
 set(MMX_SWITCH_ICON "${CMAKE_CURRENT_LIST_DIR}/icon.jpg" CACHE FILEPATH "NRO icon (256x256 JPEG)")
 
 function(mmx_switch_target target)
-    target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/switch/switch_main.c)
+    target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/switch/switch_main.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/switch/thorhax_intro_glue.cpp)
+    # The Thorhax intro video, played at startup (switch/thorhax_intro/README.md).
+    include(${CMAKE_CURRENT_SOURCE_DIR}/switch/thorhax_intro/thorhax_intro.cmake)
+    thorhax_intro_add(${target})
+    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/switch/thorhax_intro)
+    # Its log macros (switch/compat/rex/logging.h) use std::format.
+    set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/switch/thorhax_intro/thorhax_intro.cpp
+        APPEND PROPERTY COMPILE_OPTIONS -std=gnu++20)
     target_compile_definitions(${target} PRIVATE MMX_DESKTOP_ENTRY=mmx_desktop_main)
     target_include_directories(${target} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/switch/compat)

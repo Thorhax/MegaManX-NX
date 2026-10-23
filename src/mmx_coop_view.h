@@ -20,6 +20,9 @@ MmxCoopViewBoundsState MmxCoopViewsGetBoundsState(void);
 bool MmxCoopViewsValidBoundsState(const MmxCoopViewBoundsState *bounds);
 void MmxCoopViewsSetBoundsState(const MmxCoopViewBoundsState *bounds);
 void MmxCoopViewsUpdateBounds(const uint8_t *ram, const MmxCoopState *state);
+/* Before a remote player takes a native door, transfer its authored view to
+ * the shared script camera while both independent views still exist. */
+void MmxCoopViewsAdoptPlayer(uint8_t *ram, const MmxCoopState *state, unsigned seat);
 void MmxCoopViewsPlayerLimits(const uint8_t *ram, const MmxCoopState *state,
                             unsigned seat, int limits[4]);
 MmxCoopView MmxCoopViewWithBounds(const uint8_t *ram, const MmxCoopState *state,

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(MegaManXSNESRecomp VERSION 2.2.9 LANGUAGES C CXX)
+project(MegaManXSNESRecomp VERSION 2.3.3 LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_package(Git QUIET)
@@ -22,9 +22,14 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/mmx_weapon_sources.h"
         "${CMAKE_CURRENT_BINARY_DIR}/mmx_weapon_sources.h"
     DEPENDS tools/generate_x_weapon_tables.py tools/data/x_weapon_assets.json VERBATIM)
 
-set(SNESRECOMP_BUILD_VERSION "${PROJECT_VERSION}-alpha" CACHE STRING "Release stamp for crash reports")
+set(SNESRECOMP_BUILD_VERSION "${PROJECT_VERSION}" CACHE STRING "Release stamp for crash reports")
 set(SNESRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/snesrecomp" CACHE PATH "snesrecomp checkout")
 set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH "recomp-ui checkout")
+option(MMX_RASTER_FULL_COPY "Use full-copy raster storage as the correctness/performance reference" OFF)
+option(MMX_STAGE_TILE_REUSE "Reuse exact stage-map lookups within one captured draw" ON)
+set_property(SOURCE src/mmx_renderer.c APPEND PROPERTY COMPILE_DEFINITIONS
+    MMX_RASTER_FULL_COPY=$<BOOL:${MMX_RASTER_FULL_COPY}>
+    MMX_STAGE_TILE_REUSE=$<BOOL:${MMX_STAGE_TILE_REUSE}>)
 set(SNESRECOMP_ENABLE_MODS ON CACHE BOOL "Shared mod package runtime" FORCE)
 # Match Gundam Endless Duel's internet-capable lobby build. Per-target netplay
 # keeps the unmodified Japanese edition and small unit tests independent.
@@ -160,6 +165,7 @@ add_mmx_variant(RockmanXSNESRecomp "${CMAKE_CURRENT_SOURCE_DIR}/variants/jp/gen"
 
 include(CTest)
 if(BUILD_TESTING)
+    add_subdirectory(${SNESRECOMP_ROOT}/runner/tests/raster_snapshot raster-snapshot-tests)
     add_subdirectory(${SNESRECOMP_ROOT}/runner/tests/diagnostics diagnostic-writer-tests)
     add_executable(mmx_boss_rush_test tests/mmx_boss_rush_test.c src/mmx_boss_rush.c src/mmx_boss_rush_draw.c)
     target_include_directories(mmx_boss_rush_test PRIVATE src)
@@ -194,6 +200,32 @@ if(BUILD_TESTING)
     add_executable(mmx_renderer_test tests/mmx_renderer_test.c src/mmx_renderer.c src/mmx_render_assets.c src/mmx_display.c src/mmx_wide_policy.c src/mmx_zero.c src/mmx_weapons.c src/mmx_weapon_combat.c src/mmx_coop_view.c src/mmx_boss_rush.c src/mmx_boss_rush_draw.c)
     target_include_directories(mmx_renderer_test PRIVATE src ${SNESRECOMP_ROOT}/runner/src)
     add_test(NAME mmx_custom_renderer COMMAND mmx_renderer_test)
+    get_target_property(mmx_renderer_reference_sources mmx_renderer_test SOURCES)
+    list(REMOVE_ITEM mmx_renderer_reference_sources src/mmx_renderer.c)
+    foreach(reference FULLCOPY TRACE)
+        string(TOLOWER "${reference}" reference_name)
+        add_executable(mmx_renderer_${reference_name}_test
+            ${mmx_renderer_reference_sources} tests/mmx_renderer_variant.c
+            src/mmx_boss_rush_score.cpp)
+        target_include_directories(mmx_renderer_${reference_name}_test PRIVATE
+            src ${SNESRECOMP_ROOT}/runner/src)
+        target_compile_definitions(mmx_renderer_${reference_name}_test PRIVATE
+            MMX_RENDERER_TEST_${reference}=1)
+        target_compile_features(mmx_renderer_${reference_name}_test PRIVATE cxx_std_17)
+        if(MSVC)
+            target_compile_options(mmx_renderer_${reference_name}_test PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(mmx_renderer_${reference_name}_test PRIVATE -UNDEBUG)
+        endif()
+        if(NOT WIN32)
+            target_link_libraries(mmx_renderer_${reference_name}_test PRIVATE m)
+        endif()
+        add_test(NAME mmx_custom_renderer_${reference_name}
+            COMMAND mmx_renderer_${reference_name}_test)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/renderer-${reference_name}")
+        set_tests_properties(mmx_custom_renderer_${reference_name} PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/renderer-${reference_name}")
+    endforeach()
     add_executable(mmx_render_capture tools/mmx_render_capture.c src/mmx_renderer.c src/mmx_render_assets.c src/mmx_display.c src/mmx_wide_policy.c src/mmx_zero.c src/mmx_weapons.c src/mmx_weapon_combat.c src/mmx_coop_view.c src/mmx_boss_rush.c src/mmx_boss_rush_draw.c)
     target_include_directories(mmx_render_capture PRIVATE src ${SNESRECOMP_ROOT}/runner/src)
     foreach(mmx_render mmx_renderer_test mmx_render_capture)
@@ -243,6 +275,14 @@ if(TARGET mmx_state_tests)
                 $<TARGET_FILE:mmx_state_tests> "${CMAKE_CURRENT_SOURCE_DIR}/mmx.sfc")
         set_tests_properties(mmx_boss_rush_reports PROPERTIES
             WORKING_DIRECTORY "${rush_report_dir}" LABELS "rom;boss-rush")
+        set(rush_pause_spawn_dir "${CMAKE_CURRENT_BINARY_DIR}/boss-rush-pause-spawn")
+        file(MAKE_DIRECTORY "${rush_pause_spawn_dir}")
+        add_test(NAME mmx_boss_rush_pause_spawn
+            COMMAND ${CMAKE_COMMAND} -E env SDL_AUDIODRIVER=dummy MMX_REPLAY_RECORD=0
+                MMX_BOSS_RUSH_TEST=1 MMX_BOSS_RUSH_PAUSE_SPAWN_TEST=1
+                $<TARGET_FILE:mmx_state_tests> "${CMAKE_CURRENT_SOURCE_DIR}/mmx.sfc")
+        set_tests_properties(mmx_boss_rush_pause_spawn PROPERTIES
+            WORKING_DIRECTORY "${rush_pause_spawn_dir}" LABELS "rom;boss-rush")
         foreach(carpet_case native widescreen ultrawide no_shot)
             set(carpet_env)
             if(carpet_case STREQUAL "widescreen")
@@ -258,6 +298,7 @@ if(TARGET mmx_state_tests)
                 COMMAND ${CMAKE_COMMAND} -E env
                     --unset=MMX_MAGIC_CARPET_WIDE --unset=MMX_MAGIC_CARPET_NO_SHOT
                     SDL_AUDIODRIVER=dummy MMX_REPLAY_RECORD=0
+                    MMX_RASTER_INVARIANTS=1
                     "MMX_MAGIC_CARPET_TEST=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/magic_carpet_inputs.csv"
                     ${carpet_env} $<TARGET_FILE:mmx_state_tests>
                     "${CMAKE_CURRENT_SOURCE_DIR}/mmx.sfc")

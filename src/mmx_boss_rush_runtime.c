@@ -21,7 +21,14 @@
 extern uint8_t g_ram[0x20000];
 static unsigned word(const uint8_t *p) {return p[0]|p[1]<<8;}
 static void put(uint8_t *p,unsigned v) {p[0]=(uint8_t)v;p[1]=(uint8_t)(v>>8);}
-static unsigned entry_x(const uint8_t *r,unsigned seat) {return word(r+0x1e4d)+64+seat*128;}
+static bool arena_camera(const uint8_t *r,const MmxBossRushState *s) {
+  unsigned x=word(r+0x1e4d),scroll=r[0x1f7a]==4?MMX_RUSH_MAMMOTH_SCROLL:0;
+  return x>=s->camera_x && x<=s->camera_x+scroll;
+}
+static unsigned entry_x(const uint8_t *r,const MmxBossRushState *s,unsigned seat) {
+  unsigned x=arena_camera(r,s)?word(r+0x1e4d):s->camera_x;
+  return x+64+seat*128;
+}
 static void stack_push(CpuState *cpu,unsigned v,unsigned bytes) {
   while(bytes) {cpu_write8(cpu,0,cpu->S,(uint8_t)(v>>(--bytes*8)));--cpu->S;}
 }
@@ -289,7 +296,7 @@ static void boss_hook(CpuState *cpu,uint32_t pc) {
     }
     if(at==0x07925e) {
       /* Keep his assigned side after the stock arrival adds $40 to X. */
-      cpu->A=(uint16_t)entry_x(g_ram,(unsigned)owner);
+      cpu->A=(uint16_t)entry_x(g_ram,&s,(unsigned)owner);
       cpu->_flag_Z=!cpu->A;cpu->_flag_N=cpu->A>>15;
       cpu->P=(cpu->P&~0x82u)|(cpu->_flag_Z?2:0)|(cpu->_flag_N?128:0);
     }
@@ -525,7 +532,11 @@ void MmxBossRushFrame(uint8_t *r,uint16_t input) {
   }
   if(s.mode==MMX_RUSH_PREPARING) {camera(r);return;}
   camera(r);
-  if(r[0xd3]==4 && !r[0x1f19] && !MmxWeaponsMenuVisible(r) && !MmxCoopGetState().menu_owner) {
+  /* The weapon-menu coroutine clears the camera before publishing its menu
+   * flags. Do not advance replacement timers or create an actor in that
+   * transient coordinate space, including when extra weapons are disabled. */
+  if(r[0xd3]==4 && !r[0x1f19] && MmxWidePolicy_IsStageScene(r) && arena_camera(r,&s) &&
+      !MmxWeaponsMenuVisible(r) && !MmxCoopGetState().menu_owner) {
     for(unsigned i=0;i<2;++i) {
       s=MmxBossRushGetState();MmxBossRushBoss *b=&s.bosses[i];
       if(b->phase==MMX_RUSH_DYING) {
@@ -557,7 +568,7 @@ void MmxBossRushFrame(uint8_t *r,uint16_t input) {
           s.bosses[i].globals[n]=r[globals[n]];
         MmxBossRushSetState(&s);
         memset(r+object,0,64);r[object]=0x81;r[object+10]=kMmxBossRushBosses[id].kind;
-        unsigned x=entry_x(r,i),y=s.camera_y+(id==4?43:96);
+        unsigned x=entry_x(r,&s,i),y=s.camera_y+(id==4?43:96);
         put(r+object+5,x);put(r+object+8,y);put(r+object+0x22,x);put(r+object+0x24,y);
       }
     }
@@ -604,6 +615,7 @@ void MmxBossRushAfterFrame(uint8_t *r) {
   MmxBossRushSetState(&s);
   for(unsigned i=0;i<2;++i) if(s.bosses[i].phase==MMX_RUSH_FIGHTING && !s.bosses[i].health)
     MmxBossRushDefeat(i);
+  MmxCoopResumeHurtTimers(r);
   bool alive=(r[0xbcf]&127)!=0;
   bool death_complete=r[0xbaa]==12 && r[0xbab]>=6;
   if(s.coop) {

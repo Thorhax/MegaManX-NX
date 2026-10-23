@@ -93,6 +93,123 @@ static void raster_and_hud(void) {
   assert(!MmxRendererDraw(output, (MmxRenderView){2048,896,8}, true));
   MmxRendererReset(); assert(!MmxRendererDraw(output, v, true));
 }
+static void raster_test_enhancer(Ppu *p, uint y, bool sub, void *context) {
+  (void)p;(void)y;(void)sub;(void)context;
+}
+static void immutable_vram_raster(void) {
+  MmxRenderView views[] = {{256,0,4.0/3.0},
+      MmxRendererViewport(MMX_ASPECT_32_9,0,0,kSnesDisplayAspect_Crt4x3),
+      MmxRendererViewport(MMX_ASPECT_16_9,0,0,kSnesDisplayAspect_Crt4x3)};
+  const char *path = "raster-storage-test.cap";
+  for (unsigned test_case = 0; test_case < 6; ++test_case) {
+    unsigned pattern=test_case%3;bool hardware=test_case>=3;
+    memset(&ppu,0,sizeof(ppu));memset(ram,0,sizeof(ram));
+    MmxRendererReset();MmxRendererSetRom(NULL,0);MmxZeroDisable();MmxBossRushReset();
+    ram[0xd1]=2;ram[0xd2]=ram[0xd3]=4;
+    ppu.inidisp=15;ppu.bgmode=1;ppu.screenEnabled[0]=16;
+    ppu.cgram[129]=31;ppu.cgram[130]=31<<5;
+    for(unsigned slot=0;slot<128;++slot) ppu.oam[slot*2]=0xe000;
+    for(unsigned slot=0;slot<28;++slot) ppu.oam[slot*2]=(uint16_t)((slot*8)<<8|16);
+    MmxRendererBeginFrame(ram);
+    ppu.vramWriteCount=UINT32_MAX-3;unsigned previous_phase=2;
+    if(hardware) MmxRendererBeginHardwareRaster(&ppu);
+    for(unsigned line=1;line<=224;++line) {
+      unsigned phase=pattern ? ((line-1)/(pattern==1?1:3))&1 : 0;
+      for(unsigned row=0;row<8;++row) ppu.vram[row]=phase?0xff00:0xff;
+      if(hardware && phase!=previous_phase && line<80) {
+        if(line==21) MmxRendererHardwareVramChanged(); /* Raw IRQ/native edit. */
+        else ++ppu.vramWriteCount; /* Port writes, including counter wrap. */
+      }
+      if(hardware && line==80) ppu.widescreenLineEnhancer=raster_test_enhancer;
+      if(hardware && line==81) ppu.widescreenLineEnhancer=NULL;
+      /* After the callback appeared, direct uncounted writes must remain on
+       * the byte-comparison path for the rest of this raster. */
+      MmxRendererCaptureLine(&ppu,line);
+      previous_phase=phase;
+    }
+    MmxRendererEndHardwareRaster();
+    assert(MmxRendererEndFrame(stock));
+    MmxRasterStats storage=MmxRendererGetRasterStats();
+    assert(storage.vram_images>=1 && storage.vram_images<=224);
+    assert(storage.vram_copied_bytes==(uint64_t)storage.vram_images*65536);
+    assert(storage.frame_metadata_bytes<1024*1024);
+#if defined(MMX_RENDERER_TEST_FULLCOPY)
+    assert(storage.vram_images==224 && !storage.vram_compared_bytes);
+#elif defined(MMX_RENDERER_TEST_TRACE)
+    assert(storage.vram_compared_bytes==223u*65536);
+#endif
+    /* Live memory changes, width changes and repeated draws cannot edit the
+     * immutable images. Alternation also catches accidental ABA aliasing. */
+    memset(&ppu,0,sizeof(ppu));memset(ram,0,sizeof(ram));
+    for(unsigned pass=0;pass<2;++pass) {
+      for(unsigned view=0;view<3;++view) {
+        MmxRenderView v=views[(view+pass)%3];
+        assert(MmxRendererDraw(output,v,false));
+        for(unsigned y=0;y<224;++y) {
+          unsigned phase=pattern ? (y/(pattern==1?1:3))&1 : 0;
+          assert(output[y*v.width+v.extra+16]==(phase?0x00ff00u:0xff0000u));
+        }
+      }
+      if(!pass) {
+        assert(MmxRendererSaveCapture(path));MmxRendererReset();
+        assert(MmxRendererLoadCapture(path));
+      }
+    }
+    FILE *f=fopen(path,"r+b");assert(f);
+    assert(!fseek(f,(long)(12+storage.frame_metadata_bytes+sizeof(uint32_t)),SEEK_SET));
+    const uint16_t invalid=65535;assert(fwrite(&invalid,sizeof(invalid),1,f)==1);fclose(f);
+    assert(!MmxRendererLoadCapture(path));
+    assert(!MmxRendererDraw(output,views[0],false));
+  }
+  /* A truncated file must not make a partially read frame drawable. */
+  FILE *f=fopen(path,"wb");assert(f);
+  uint32_t header[]={0x4d4d5843,24,0};assert(fwrite(header,sizeof(header),1,f)==1);fclose(f);
+  assert(!MmxRendererLoadCapture(path));
+  assert(!MmxRendererDraw(output,views[0],false));
+  remove(path);MmxRendererReset();
+}
+static void stage_map_draw_lifetime(void) {
+  memset(&ppu,0,sizeof(ppu));memset(ram,0,sizeof(ram));memset(rom_bytes,0,sizeof(rom_bytes));
+  MmxRendererReset();MmxRendererSetRom(NULL,0);MmxZeroDisable();MmxBossRushReset();
+  g_mmx_render_asset_repairs=false;
+  ram[0xd1]=2;ram[0xd2]=ram[0xd3]=4;
+  ram[0xb96]=ram[0xb97]=0x80; /* BG1 metatile table at $80:8000. */
+  rom_bytes[2]=1;rom_bytes[4]=16;rom_bytes[6]=17;
+  ppu.inidisp=15;ppu.bgmode=1;ppu.screenEnabled[0]=1;
+  ppu.bgTileAdr=2;ppu.bgXsc[0]=0x40;
+  ppu.cgram[1]=31;ppu.cgram[2]=31<<5;ppu.cgram[3]=31<<10;ppu.cgram[4]=0x7fff;
+  for(unsigned slot=0;slot<128;++slot) ppu.oam[slot*2]=0xe000;
+  for(unsigned row=0;row<8;++row) {
+    ppu.vram[0x2000+row]=0xff;
+    ppu.vram[0x2010+row]=0xff00;
+    ppu.vram[0x2100+row]=0xffff;
+    ppu.vram[0x2118+row]=0xff;
+  }
+  MmxRendererSetRom(rom_bytes,sizeof(rom_bytes));capture();
+  const uint32_t colors[]={0xff0000,0x00ff00,0x0000ff,0xffffff};
+  const MmxRenderView views[]={{342,43,16.0/9.0},{682,213,32.0/9.0},{342,43,16.0/9.0}};
+  for(unsigned edit=0;edit<2;++edit) {
+    for(unsigned v=0;v<3;++v) {
+      MmxRenderView view=views[v];assert(MmxRendererDraw(output,view,false));
+      for(unsigned y=0;y<224;++y)for(int x=-view.extra;x<256+view.extra;++x) {
+        unsigned expected=0xff0000;
+        if(x<0 || x>=256) {
+          unsigned wx=x<0?(unsigned)(-x-1):(unsigned)x;
+          expected=edit?0x00ff00:colors[((wx>>3)&1)|((((y+1)>>3)&1)<<1)];
+        }
+        if(output[y*view.width+x+view.extra]!=expected)
+          fprintf(stderr,"stage-map edit=%u view=%u x=%d y=%u got=%08x expected=%08x\n",
+              edit,v,x,y,output[y*view.width+x+view.extra],expected);
+        assert(output[y*view.width+x+view.extra]==expected);
+      }
+    }
+    /* Editing the external ROM between draws must not reuse an earlier
+     * result, even with the same captured RAM and ROM pointer. */
+    for(unsigned q=0;q<4;++q)rom_bytes[q*2]=1;
+  }
+  memset(rom_bytes,0,sizeof(rom_bytes));
+  g_mmx_render_asset_repairs=true;MmxRendererReset();MmxRendererSetRom(NULL,0);
+}
 static void sprite_coordinates(void) {
   memset(&ppu, 0, sizeof(ppu)); memset(ram, 0, sizeof(ram));
   ram[0xd1] = 2; ram[0xd2] = 4; ram[0xd3] = 4;
@@ -1638,6 +1755,7 @@ static void rush_static_and_streamed_graphics(void) {
   }
   MmxBossRushReset();g_mmx_custom_renderer=false;MmxRendererSetRom(NULL,0);
 }
+#include "mmx_coop_weapon_graphics_test.inc"
 static void weapons_menu_margins(void) {
   memset(&ppu, 0, sizeof(ppu)); memset(ram, 0, sizeof(ram));
   MmxRendererReset(); MmxRendererSetRom(NULL, 0);
@@ -1678,4 +1796,4 @@ static void rush_results_page(void) {
   assert((output[48*256+92]&0xffffff)==0x00ffff);
   MmxBossRushReset();
 }
-int main(void) { geometry(); raster_and_hud(); sprite_coordinates(); independent_oam_visibility(); expanded_capacity(); background_resources(); dialogue_and_password(); highway_arena_sky(); highway_airship_binding(); distant_doors(); storm_background_prefill(); resource_decode(); spark_effects(); airport_panorama_edge(); airport_upper_sky_repair(); wide_water_plane(); buried_submarine(); background_continuations(); launch_background_palettes(); sting_background_palettes(); mammoth_background_palettes(); dialogue_backdrop(); fortress_actor_presentation(); storm_dormant_presentation(); sprite_priority_and_cutscene_binding(); weapons_menu_margins(); zero_blink_submission(); rush_private_pose_graphics(); rush_static_and_streamed_graphics(); rush_results_page(); return 0; }
+int main(void) { geometry(); raster_and_hud(); immutable_vram_raster(); stage_map_draw_lifetime(); sprite_coordinates(); independent_oam_visibility(); expanded_capacity(); background_resources(); dialogue_and_password(); highway_arena_sky(); highway_airship_binding(); distant_doors(); storm_background_prefill(); resource_decode(); spark_effects(); airport_panorama_edge(); airport_upper_sky_repair(); wide_water_plane(); buried_submarine(); background_continuations(); launch_background_palettes(); sting_background_palettes(); mammoth_background_palettes(); dialogue_backdrop(); fortress_actor_presentation(); storm_dormant_presentation(); sprite_priority_and_cutscene_binding(); weapons_menu_margins(); zero_blink_submission(); rush_private_pose_graphics(); rush_static_and_streamed_graphics(); rush_results_page(); coop_special_graphics(); return 0; }

@@ -20,6 +20,8 @@ static MmxSpriteAsset charged_buster[2][21];
 static bool charged_buster_ready[2][21];
 static MmxSpriteAsset player_weapons[9][2];
 static uint8_t player_weapon_ready[9];
+static MmxSpriteAsset native_shots[2][8];
+static uint64_t native_shot_keys[2][8];
 static uint8_t ready[256], sprite_resource[256];
 static uint16_t asset_palette[256], rush_palette[13][256];
 static unsigned cached_stage = ~0u, cached_section = ~0u;
@@ -77,6 +79,7 @@ void MmxRenderAssetsSetRom(const uint8_t *bytes, size_t size) {
   memset(dash_effect_ready,0,sizeof(dash_effect_ready));
   memset(charged_buster_ready,0,sizeof(charged_buster_ready));
   memset(player_weapon_ready,0,sizeof(player_weapon_ready));
+  memset(native_shot_keys,0,sizeof(native_shot_keys));
   for(unsigned stage=0;stage<13;++stage) for(unsigned sprite=0;sprite<256;++sprite) {
     free(rush_assets[stage][sprite]);rush_assets[stage][sprite]=NULL;
   }
@@ -164,6 +167,48 @@ static const MmxSpriteAsset *MmxRenderAssetsChargedBuster_unlocked(unsigned grou
   memcpy(art->colors,palette->colors,sizeof(art->colors));
   art->attributes=6;art->live_colors=true;charged_buster_ready[kind][pose]=true;
   return art;
+}
+static const MmxSpriteAsset *MmxRenderAssetsNativeShot_unlocked(const uint8_t ram[0x20000],
+    unsigned object,unsigned group,unsigned pose,unsigned seat) {
+  if(!rom || !ram || seat>1 || group>255 || pose>127 ||
+      object<0x1228 || object>=0x1428 || (object-0x1228)%64)
+    return NULL;
+  unsigned kind=ram[object+10];
+  unsigned weapon=kind>=7 && kind<=14 ? kind-6 : kind>=16 && kind<=23 ? kind-15 : 0;
+  if(!weapon) return NULL;
+  const MmxSpriteAsset *base=MmxRenderAssetsWeaponX_unlocked(weapon,false);
+  if(!base) return NULL;
+  unsigned table=ram_word(ram,object+0x31);
+  uint64_t key=((uint64_t)kind<<48)|((uint64_t)group<<40)|((uint64_t)table<<24)|
+      (pose<<8)|1;
+  unsigned slot=(object-0x1228)/64;
+  MmxSpriteAsset *art=&native_shots[seat][slot];
+  if(native_shot_keys[seat][slot]==key) return art;
+  native_shot_keys[seat][slot]=0;
+  *art=*base;
+  /* $84:8FCA reads the object's bank-$85 pose directory. Rebuild its
+   * uploads privately: empty/short records retain earlier rows. A shot can
+   * be restored mid-animation, so derive these rows from ROM, not host history. */
+  if(table>=0x8000) {
+    size_t directory=lorom(0x850000|table);
+    for(unsigned frame=0;frame<=pose;++frame) {
+      size_t list=directory+word(directory+frame*2);
+      bool complete=false;
+      for(unsigned n=0;n<32;++n,list+=5) {
+        if(!range(list,5)) return NULL;
+        unsigned count=rom[list]*16;
+        if(!count) {complete=true;break;}
+        int dest=(rom[list+4]&127)*512-0xc000;
+        size_t source=lorom(word(list+1)|(rom[list+3]<<16));
+        if(dest<0 || dest+(int)count>sizeof(art->tiles) || !range(source,count) || rom[list+3]==0x7f)
+          return NULL;
+        memcpy(art->tiles+dest,rom+source,count);
+        if(rom[list+4]&128) {complete=true;break;}
+      }
+      if(!complete) return NULL;
+    }
+  }
+  native_shot_keys[seat][slot]=key;return art;
 }
 static bool MmxRenderAssetsStingPalette_unlocked(unsigned phase,uint16_t colors[16]) {
   if(!rom || !colors || phase>14 || (phase&1)) return false;
@@ -1000,6 +1045,13 @@ const MmxSpriteAsset *MmxRenderAssetsRushObjectSprite(const uint8_t ram[0x20000]
 const MmxSpriteAsset *MmxRenderAssetsResource(unsigned stage, unsigned section, unsigned resource) {
   assets_lock();
   const MmxSpriteAsset * result = MmxRenderAssetsResource_unlocked(stage, section, resource);
+  assets_unlock();
+  return result;
+}
+const MmxSpriteAsset *MmxRenderAssetsNativeShot(const uint8_t ram[0x20000],
+    unsigned object,unsigned group,unsigned pose,unsigned seat) {
+  assets_lock();
+  const MmxSpriteAsset * result = MmxRenderAssetsNativeShot_unlocked(ram, object, group, pose, seat);
   assets_unlock();
   return result;
 }

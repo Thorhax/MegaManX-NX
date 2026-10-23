@@ -5,7 +5,9 @@ from pathlib import Path
 import re
 
 MARKER = '/*MMX-ZERO*/'
-PCS = {0x81971c, 0x819793, 0x8198fc}
+PCS = {0x81971c, 0x819793, 0x8198fc, 0x819ea1, 0x8499a4}
+# The head-crush block clears a body flag before loading the upgrade byte.
+UPGRADE_LOAD_PCS = {0x819ea1: 0x819ea5}
 MUZZLE_PCS = {0x81a566, 0x81a578, 0x838b6a, 0x838d82, 0x838eb4,
               0x839518, 0x83983c, 0x839974, 0x83a3a9}
 ORIGIN_PCS = {0x8283ed: 1, 0x83958c: 0, 0x839dc5: 1}
@@ -17,6 +19,7 @@ REQUIRED |= {0x049e15, 0x049e3a}  # Compiled low-bank mirror of native contact.
 # Dash exits that would stand Zero up, and the dash blocks that continue it.
 SLIDE_PCS = {0x81898e: '8991', 0x818999: '899C', 0x818965: '8971'}
 REQUIRED |= SLIDE_PCS.keys() | {0x81a062}
+REQUIRED |= {0x819eac, 0x819ef3, 0x819f36}
 
 
 def apply(text):
@@ -40,7 +43,22 @@ def apply(text):
             if store and int(store[1] == '8') == axis:
                 output.append(f'    {MARKER} {{ extern uint8_t g_ram[0x20000]; extern unsigned MmxZeroWeaponOrigin(const uint8_t *, unsigned, unsigned, unsigned); {store[2]} = (uint16)MmxZeroWeaponOrigin(g_ram, cpu->D, {axis}, {store[2]}); cpu_write_a_m(cpu, {store[2]}); }}\n')
                 found.add(pc)
+        if pc == 0x819ef3:
+            store = re.search(r'cpu_write16\(cpu, cpu->DB, \(uint16\)\(0x0002\), (_v\d+)\);', line)
+            if store:
+                output.append(f'    {MARKER} {{ extern uint8_t g_ram[0x20000]; extern unsigned MmxZeroHeadBreakY(const uint8_t *, unsigned, unsigned); {store[1]} = (uint16)MmxZeroHeadBreakY(g_ram,cpu->D,{store[1]}); cpu_write_a_m(cpu,{store[1]}); }}\n')
+                found.add(pc)
         output.append(line)
+        if pc == 0x819f36:
+            load = re.search(r'uint16 (_v\d+) = 0xffed;', line)
+            if load:
+                output.append(f'    {MARKER} {{ extern uint8_t g_ram[0x20000]; extern unsigned MmxZeroHeadProbe(const uint8_t *, unsigned, unsigned); {load[1]} = (uint16)MmxZeroHeadProbe(g_ram,cpu->D,{load[1]}); }}\n')
+                found.add(pc)
+        if pc == 0x819eac:
+            load = re.search(r'uint8 (_v\d+) = 0xed;', line)
+            if load:
+                output.append(f'    {MARKER} {{ extern uint8_t g_ram[0x20000]; extern unsigned MmxZeroHeadProbe(const uint8_t *, unsigned, unsigned); {load[1]} = (uint8)MmxZeroHeadProbe(g_ram,cpu->D,{load[1]}); }}\n')
+                found.add(pc)
         if (pc & 0x7fffff) == 0x049e15:
             load = re.search(r'uint16 (_v\d+) = cpu_read16\(cpu,', line) if '0x000a' in line and 'cpu->X' in line else None
             if load:
@@ -114,7 +132,8 @@ def apply(text):
         if pc in PCS:
             load = re.search(r'uint8 (_v\d+) = cpu_read8\(cpu, cpu->DB, \(uint16\)\(0x1f99\)\);', line)
             if load:
-                output.append(f'    {MARKER} {{ extern unsigned MmxZeroUpgradeBits(unsigned, unsigned); {load[1]} = (uint8)MmxZeroUpgradeBits(0x{pc:06x}, {load[1]}); }}\n')
+                source = UPGRADE_LOAD_PCS.get(pc, pc)
+                output.append(f'    {MARKER} {{ extern unsigned MmxZeroUpgradeBits(unsigned, unsigned); {load[1]} = (uint8)MmxZeroUpgradeBits(0x{source:06x}, {load[1]}); }}\n')
                 found.add(pc)
     return ''.join(output), found
 

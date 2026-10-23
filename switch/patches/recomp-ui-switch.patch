@@ -1,8 +1,8 @@
 diff --git a/recomp_ui.cmake b/recomp_ui.cmake
-index dd5c935..1f25e79 100644
+index 5f8fd7d..9f7b8f2 100644
 --- a/recomp_ui.cmake
 +++ b/recomp_ui.cmake
-@@ -229,7 +229,9 @@ function(recomp_target_launcher_ui TGT)
+@@ -267,7 +267,9 @@ function(recomp_target_launcher_ui TGT)
      elseif(RECOMP_UI_LANGUAGE)
          recomp_target_launcher_language(${TGT} "${RECOMP_UI_LANGUAGE}")
      endif()
@@ -13,7 +13,7 @@ index dd5c935..1f25e79 100644
          target_compile_definitions(${TGT} PRIVATE
              LNG_GLES2=1
              IMGUI_IMPL_OPENGL_ES2=1)
-@@ -249,7 +251,10 @@ function(recomp_target_launcher_ui TGT)
+@@ -287,7 +289,10 @@ function(recomp_target_launcher_ui TGT)
      # than having to remember to link OpenGL itself — mirrors the standalone
      # CMakeLists.txt. SDL is still the host's to provide (its provenance varies:
      # vendored, find_package, etc.); GL is a uniform system lib, so it lives here.
@@ -25,7 +25,7 @@ index dd5c935..1f25e79 100644
          find_library(RUI_GLES2_LIBRARY GLESv2 REQUIRED)
          find_library(RUI_EGL_LIBRARY EGL REQUIRED)
          find_library(RUI_LOG_LIBRARY log REQUIRED)
-@@ -273,7 +278,7 @@ function(recomp_target_launcher_ui TGT)
+@@ -311,7 +316,7 @@ function(recomp_target_launcher_ui TGT)
      # remember, no missing-dependency failure.
      if(WIN32)
          target_link_libraries(${TGT} PRIVATE d2d1 dwrite windowscodecs ole32)
@@ -35,7 +35,7 @@ index dd5c935..1f25e79 100644
          if(TARGET Freetype::Freetype)
              target_compile_definitions(${TGT} PRIVATE RECOMP_UI_HAVE_FREETYPE=1)
 diff --git a/src/common/backends/imgui/launcher_imgui.cpp b/src/common/backends/imgui/launcher_imgui.cpp
-index 4dc73c7..85d84a8 100644
+index e1a0bca..1535913 100644
 --- a/src/common/backends/imgui/launcher_imgui.cpp
 +++ b/src/common/backends/imgui/launcher_imgui.cpp
 @@ -238,6 +238,33 @@ void scale_mouse_event(SDL_Event& e, float coords) {
@@ -81,7 +81,7 @@ index 4dc73c7..85d84a8 100644
      style.TouchExtraPadding = ImVec2(5.0f, 5.0f);
      style.ScrollbarSize = 24.0f;
  #endif
-@@ -3916,6 +3943,7 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+@@ -3933,6 +3960,7 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
          // no measuring pass over the labels is needed and the card reads as a
          // grid flush on both sides.
          const float cb = ImGui::GetFrameHeight();   // a checkbox is square
@@ -89,7 +89,7 @@ index 4dc73c7..85d84a8 100644
          row_window_scale(m, th);
          if (launcher_model_render_pipeline_offered(m)) {
          row_label_right("Render thread", th, px(SETTINGS_CTRL_W));
-@@ -3944,10 +3972,13 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+@@ -3961,10 +3989,13 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
          ImGui::EndDisabled();
      }
  
@@ -103,7 +103,7 @@ index 4dc73c7..85d84a8 100644
          if (m->num_display_layouts > 0) {
              row_label_right("Screen layout", th, px(180));
              ImGui::PushID("screen_layout");
-@@ -4050,7 +4081,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+@@ -4067,7 +4098,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
          if (ImGui::Button(ui_text(launcher_model_window_size_label(m)), ImVec2(px(SETTINGS_CTRL_W), px(30))))
              launcher_model_cycle_window_size(m);
      } else {
@@ -113,7 +113,7 @@ index 4dc73c7..85d84a8 100644
      }
  
      // NES module rows can appear on this branch too (has_renderer puts NES
-@@ -4179,7 +4212,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
+@@ -4196,7 +4229,9 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
      // Universal fullscreen row (every console — no longer gated on the
      // vestigial has_fullscreen_toggle). A tri-state dropdown, so Exclusive is
      // both reachable and visible without pressing through the other two.
@@ -123,7 +123,7 @@ index 4dc73c7..85d84a8 100644
      if (m->num_display_layouts > 0) {
          /* Wider than the shared column: these labels come from the HOST, not
           * from a vocabulary this file owns, and a button (unlike a combo) does
-@@ -14538,6 +14573,9 @@ std::string asset(const char* rel) {
+@@ -14585,6 +14620,9 @@ std::string asset(const char* rel) {
  
  #if defined(__ANDROID__)
      const char* base = SDL_AndroidGetInternalStoragePath();
@@ -133,7 +133,7 @@ index 4dc73c7..85d84a8 100644
  #else
      const char* base = SDL_GetBasePath();
  #endif
-@@ -14587,7 +14625,7 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+@@ -14634,7 +14672,7 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
       * KEY would have to be physically held, and the window would not have
       * focus to receive it. */
      s_pad_nav_armed = false;
@@ -142,7 +142,7 @@ index 4dc73c7..85d84a8 100644
      io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
  #endif
      io.IniFilename = nullptr;
-@@ -14806,6 +14844,14 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+@@ -14853,6 +14891,14 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
              default:
                  break;
              }
@@ -170,26 +170,27 @@ index 65c1527..8fc3df5 100644
           * dashboard, which made it the one netplay page a screenshot script
           * could not open. */
 diff --git a/src/common/launcher_files.c b/src/common/launcher_files.c
-index 0272a7e..94f9a33 100644
+index 13c5948..020ae54 100644
 --- a/src/common/launcher_files.c
 +++ b/src/common/launcher_files.c
-@@ -660,7 +660,10 @@ static int linux_pick_folder(const char* title, char* out, size_t out_cap) {
+@@ -660,9 +660,9 @@ static int linux_pick_folder(const char* title, char* out, size_t out_cap) {
  #endif /* __linux__ */
  
  bool launcher_native_file_picker_available(void) {
--#if defined(__linux__)
-+#if defined(__SWITCH__)
-+    /* No native chooser on the console: every Browse uses the in-app one. */
-+    return false;
-+#elif defined(__linux__)
+-#if defined(__ANDROID__)
+-    /* Android hosts import external files through SAF. The shared launcher
+-     * browses the imported files in-app; desktop helpers are unavailable. */
++#if defined(__ANDROID__) || defined(__SWITCH__)
++    /* Android imports external files through SAF and the console has no
++     * native chooser: both browse in the shared launcher's in-app picker. */
+     return false;
+ #elif defined(__linux__)
      return linux_have_cmd("zenity") || linux_have_cmd("kdialog");
- #else
-     return true;
 diff --git a/src/common/launcher_model.c b/src/common/launcher_model.c
-index febe98d..ce3c9f8 100644
+index eacae9a..3256415 100644
 --- a/src/common/launcher_model.c
 +++ b/src/common/launcher_model.c
-@@ -3143,6 +3143,20 @@ static DWORD WINAPI prep_thread_main(LPVOID arg);
+@@ -3366,6 +3366,20 @@ static DWORD WINAPI prep_thread_main(LPVOID arg);
  static void* prep_thread_main(void* arg);
  #endif
  
@@ -210,7 +211,7 @@ index febe98d..ce3c9f8 100644
  static int prep_spawn_thread(LauncherModel* m) {
  #if defined(_WIN32)
      HANDLE th = CreateThread(NULL, 0, prep_thread_main, &g_prep_job, 0, NULL);
-@@ -3155,13 +3169,23 @@ static int prep_spawn_thread(LauncherModel* m) {
+@@ -3378,13 +3392,23 @@ static int prep_spawn_thread(LauncherModel* m) {
      CloseHandle(th);
  #else
      pthread_t th;
@@ -235,10 +236,10 @@ index febe98d..ce3c9f8 100644
      return 1;
  }
 diff --git a/src/common/launcher_model.h b/src/common/launcher_model.h
-index d01602e..b5fcdf7 100644
+index 1e065a4..95c98ad 100644
 --- a/src/common/launcher_model.h
 +++ b/src/common/launcher_model.h
-@@ -1199,6 +1199,9 @@ void launcher_model_start_prepare_disc(LauncherModel* m, const char* source_path
+@@ -1233,6 +1233,9 @@ void launcher_model_start_prepare_disc(LauncherModel* m, const char* source_path
  /* Run the host's bios_prepare_with_progress for the staged BIOS (progress
   * modal only; wizard resumes after). No-op without the callback. */
  void launcher_model_begin_bios_prepare(LauncherModel* m);

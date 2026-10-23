@@ -1,6 +1,7 @@
 #include "mmx_weapon_combat.h"
 #include "mmx_weapons.h"
 #include "mmx_zero.h"
+#include "mmx_boss_rush.h"
 #include <string.h>
 
 static MmxWeaponCombatState combat;

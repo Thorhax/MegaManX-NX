@@ -36,7 +36,8 @@ The launcher, mods, password saves, save states and rewind all come with it.
 3. Optional, for Zero, co-op and the X3 weapons: your **Mega Man X3 (USA)** ROM.
    For the X2 weapons: your **Mega Man X2 (USA)** ROM. Put them in the same
    folder and select them in the launcher's **Mods** page.
-4. Start **Mega Man X Recompiled** from the Homebrew Menu. Use title-override
+4. Start **Mega Man X Recompiled** from the Homebrew Menu. A short intro plays
+   first; any button skips it after 3 seconds. Use title-override
    mode (hold R while opening a game) so the game gets full memory.
 
 ## Controls
@@ -81,7 +82,8 @@ and `switch/package.sh`. The upstream project's own documentation is in
   framework and the [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui) launcher.
 - Third-party components keep their own licenses. See `third_party/`,
   `snesrecomp/THIRD_PARTY_ATTRIBUTION.md` and the submodules.
-- **Thorhax**: the Nintendo Switch port.
+- **Thorhax**: the Nintendo Switch port and its startup intro.
+- [pl_mpeg](https://github.com/phoboslab/pl_mpeg) by Dominic Szablewski (MIT) decodes the intro video.
 
 ## License
 
