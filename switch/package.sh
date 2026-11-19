@@ -23,8 +23,8 @@ cat > "$OUT/PUT_YOUR_ROM_HERE.txt" <<'TXT'
 Copy your own Mega Man X (USA) (Rev 1) ROM here as mmx.sfc
 (any .sfc/.smc name works; it is verified by SHA-256).
 
-Optional, for the Zero / co-op / X3 weapon mods: your Mega Man X3 (USA) ROM.
-Optional, for the X2 weapon mod: your Mega Man X2 (USA) ROM.
+Optional, for the Zero / co-op / X3 weapon and X3 armor mods: your Mega Man X3 (USA) ROM.
+Optional, for the X2 weapon and X2 armor mods: your Mega Man X2 (USA) ROM.
 Select them in the launcher's Mods page (Browse opens an SD-card browser).
 TXT
 python3 -I -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', sys.argv[2], 'switch')" "$ROOT/dist/MegaManX-NX" "$ROOT/dist/SD_CARD"

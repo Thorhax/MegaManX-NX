@@ -2,6 +2,13 @@
 #include "mmx_rtl.h"
 #include "mmx_replay.h"
 #include "mmx_dev_menu.h"
+#include "mmx_coop_view.h"
+
+static void MmxFrameEnd(void) {
+  MmxCoopState coop=MmxCoopGetState();
+  MmxCoopViewsEndFrame(g_ram,&coop);
+  MmxReplayEnd();
+}
 
 /* MMX_VARIANT_JP is a per-target compile-def (RockmanXSNESRecomp sets =1;
  * the USA MegaManX target leaves it undefined). Guard so this file compiles
@@ -37,5 +44,5 @@ const RtlGameInfo kMmxGameInfo = {
   .on_state_loaded = &MmxOnStateLoaded,
   .hardware_reset = &MmxOnHardwareReset,
   .frame_begin = &MmxFrameBegin,
-  .frame_end = &MmxReplayEnd,
+  .frame_end = &MmxFrameEnd,
 };

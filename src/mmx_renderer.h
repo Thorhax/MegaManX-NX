@@ -8,6 +8,15 @@ int MmxRendererGetPeerView(void);
 #include "mmx_display.h"
 #include "mmx_coop.h"
 
+#ifndef MMX_NATIVE_RASTER
+#define MMX_NATIVE_RASTER 0
+#endif
+
+/* A native producer claims only fully captured lines it can compose itself.
+ * Required PPU state/status work and unsupported output stay load-bearing. */
+bool MmxRendererClaimNativeLine(const Ppu *ppu, unsigned line);
+unsigned MmxRendererNativeLines(void);
+
 enum { MMX_RENDER_HEIGHT = 224, MMX_RENDER_MAX_WIDTH = 1024 };
 typedef enum MmxRenderAspect {
   MMX_ASPECT_ADAPTIVE, MMX_ASPECT_16_9, MMX_ASPECT_21_9, MMX_ASPECT_32_9
@@ -104,6 +113,10 @@ extern bool g_mmx_render_asset_repairs;
 extern MmxRenderAspect g_mmx_custom_aspect;
 extern MmxRenderView g_mmx_custom_view;
 void MmxRendererSetCompactCoopHud(bool compact);
+/* Learner Mode: P2 cannot lose health, so the mod hides its meter unless the
+ * player shows it. The weapon column keeps its place. */
+void MmxRendererSetHideLearnerHealth(bool hide);
+bool MmxRendererHidesLearnerHealth(void);
 /* The mod selects the output aspect; Display Aspect selects pixel proportions.
  * Clamp the view extent at those proportions before rounding to an even width. */
 MmxRenderView MmxRendererViewport(MmxRenderAspect aspect, int width, int height,
@@ -149,6 +162,10 @@ bool MmxRendererDraw(uint32_t *output, MmxRenderView view, bool anchor_hud);
 /* Ends and joins the row worker threads (the next draw starts them again).
  * The Switch NRO calls it before returning to the homebrew loader. */
 void MmxRendererStopWorkers(void);
+
+/* Render both seats from the same immutable frame and publish the pair only
+ * after both succeed. The caller duplicates its canonical fallback on failure. */
+bool MmxRendererDrawLocalPair(uint8_t *output, size_t pitch, MmxRenderView view, bool anchor_hud);
 MmxRenderStats MmxRendererGetStats(void);
 MmxRasterStats MmxRendererGetRasterStats(void);
 bool MmxRendererStageTile(const uint8_t ram[0x20000], unsigned layer,

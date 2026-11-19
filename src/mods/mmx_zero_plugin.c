@@ -4,6 +4,7 @@
 #include "snes/interp_bridge.h"
 #include "mmx_renderer.h"
 #include "mmx_zero.h"
+#include "mmx_armor.h"
 #include "mmx_weapons.h"
 #include "mmx_weapon_combat.h"
 #include "mmx_source_assets.h"
@@ -18,9 +19,9 @@
 
 extern uint8_t g_ram[0x20000];
 static void weapon_energy_hook(CpuState *cpu, uint32_t pc) {
-  if (!MmxWeaponsEnabled()) return;
   pc &= 0x7fffff;
   if (pc == 0x9ef9) { MmxWeaponsRefill(); return; }
+  if (!MmxWeaponsEnabled()) return;
   if (pc == 0x01e169) { MmxWeaponsEnergyOverflow(g_ram,cpu->X); return; }
   bool store = pc == 0xd91d || pc == 0xd95e || pc == 0xd9ab || pc == 0x01e0ce;
   if (store) {
@@ -61,7 +62,7 @@ static void weapon_menu_hook(CpuState *cpu, uint32_t pc) {
   cpu->P = (cpu->P & ~0x82) | (cpu->_flag_Z ? 2 : 0) | (cpu->_flag_N ? 128 : 0);
 }
 static void hook(CpuState *cpu, uint32_t pc) {
-  if (!MmxZeroEnabled() && !MmxWeaponsEnabled()) return;
+  if (!MmxZeroEnabled() && !MmxWeaponsEnabled() && !MmxArmorEnabled()) return;
   switch (pc & 0x7fffff) {
     case 0x019ef9:
       /* Intercept the STA, which preserves the native ADC flags. */
@@ -215,6 +216,7 @@ static bool zero_terrain_solid(const uint8_t *r, int x, int y) {
 }
 void MmxZeroRegisterHooks(void) {
   MmxZeroSetTerrainQuery(zero_terrain_solid);
+  MmxArmorSetTerrainQuery(zero_terrain_solid);
   const unsigned pcs[] = {0x009dca, 0x00d6a7, 0x00d76a, 0x01971f, 0x019796, 0x0198ff,
                           0x019ea8, 0x019eae, 0x019ef9, 0x019f59, 0x0499a7,
                           0x01815c, 0x018165, 0x019d47, 0x0194af, 0x00d3e7, 0x00d4f4, 0x00d511, 0x049e1d, 0x049e3a, 0x049e45, 0x049e76, 0x049c19, 0x048f07, 0x048eea, 0x018b04, 0x0491dc, 0x02823e,
@@ -284,6 +286,8 @@ static void activate_coop(void) {
   MmxZeroSetModern(!strcmp(behavior,"modern"));
   snes_mod_runtime_feature_option_value_c("megaman-x.coop","coop","cameras",cameras,sizeof(cameras));
   MmxCoopViewsSetIndependent(!strcmp(cameras,"independent"));
+  snes_mod_runtime_feature_option_value_c("megaman-x.coop","coop","local_cameras",cameras,sizeof(cameras));
+  MmxCoopViewsSetLocalSplit(!strcmp(cameras,"split"));
   snes_mod_runtime_feature_option_value_c("megaman-x.coop","coop","hud",hud,sizeof(hud));
   MmxRendererSetCompactCoopHud(strcmp(hud,"horizontal")!=0);
   unsigned p1=!strcmp(character,"zero") ? MMX_COOP_ZERO : MMX_COOP_X;
@@ -296,6 +300,15 @@ static void activate_coop(void) {
   if(!strcmp(behavior,"saber")) MmxSaberActivate("megaman-x.coop","coop",true);
 #endif
   fprintf(stderr,"[mmx-coop] Co-op enabled; P1 is %s\n",p1==MMX_COOP_X?"X":"Zero");
+}
+/* Its own package, which requires co-op. Only flags are set here, so the
+ * order against activate_coop does not matter: MmxCoopEnable keeps them. */
+static void activate_learner(void) {
+  char health[16]={0};
+  snes_mod_runtime_feature_option_value_c("megaman-x.coop.learner","learner","health",health,sizeof(health));
+  MmxRendererSetHideLearnerHealth(strcmp(health,"true") && strcmp(health,"1") && strcmp(health,"on"));
+  MmxCoopSetLearner(true);
+  fprintf(stderr,"[mmx-coop] P2 Learner Mode%s\n",MmxCoopLearner()?"":" waits for co-op");
 }
 static void activate_weapons(unsigned game) {
   char path[4096];
@@ -311,8 +324,12 @@ static void activate_weapons(unsigned game) {
 static void activate_x2(void) { activate_weapons(2); }
 static void activate_x3(void) { activate_weapons(3); }
 static void reset(void) {
+  MmxArmorDisable();
   MmxRendererSetCompactCoopHud(true);
+  MmxRendererSetHideLearnerHealth(false);
   MmxCoopViewsSetIndependent(false);
+  MmxCoopViewsSetLocalSplit(false);
+  MmxCoopViewsSetActive(false);
   MmxCoopDisable();
   if (MmxWeaponsEnabled()) g_ram[0x1f12] = 0;
   MmxZeroSetStartCharacter(false);
@@ -323,6 +340,7 @@ SNES_MOD_CONSTRUCTOR(mmx_register_zero_plugin) {
   (void)snes_mod_register_reset_callback(reset);
   (void)snes_mod_register_activation_plugin("megaman-x.zero", activate);
   (void)snes_mod_register_activation_plugin("megaman-x.coop",activate_coop);
+  (void)snes_mod_register_activation_plugin("megaman-x.coop.learner",activate_learner);
   (void)snes_mod_register_activation_plugin("megaman-x.weapons.x2",activate_x2);
   (void)snes_mod_register_activation_plugin("megaman-x.weapons.x3",activate_x3);
 }

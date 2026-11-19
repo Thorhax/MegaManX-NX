@@ -92,9 +92,11 @@ Rev 1 build.
 | &#9745; | **Adaptive widescreen** | Expanded gameplay with adaptive, 16:9, 21:9, and 32:9 views. |
 | &#9745; | **Playable Zero** | X3 Zero with his buster/saber combo and grounded character switching. Separate health for X and Zero. |
 | &#9745; | **Modern Zero** | Direct saber attacks, double jump, air dash, and movement during airborne swings. |
-| &#9745; | **Co-op mode** | X and Zero on screen together, with independent health, weapons, and weapon energy. |
+| &#9745; | **Co-op mode** | X and Zero with independent health, weapons, and weapon energy. Optional [local side-by-side screens](docs/local-independent-views.md), at 5:4 per player or widescreen per pane. |
+| &#9745; | **[Boss Rush](docs/boss-rush.md)** | Endless fights against two different Mavericks, solo or co-op, from the game's title menu. |
 | &#9745; | **X2 weapons** | All eight boss weapons and their charged attacks, adapted for X and Zero. |
 | &#9745; | **X3 weapons** | All eight boss weapons and their charged attacks, adapted for X and Zero. |
+| &#9745; | **X2 / X3 Armor (experimental)** | Donor X graphics and abilities, unlocked through X1's armor capsules. X3 Gold Armor is awarded by the Hadouken capsule. |
 | &#9745; | **Netplay** | Two-player online co-op with lobbies and rollback, plus optional fixed widescreen. |
 
 See the [co-op validation notes](docs/coop-port.md) for current limits.
@@ -112,9 +114,19 @@ For Zero or co-op, select your own **Mega Man X3 USA ROM** in Mods. The X3
 weapon mod shares that selection. X2 weapons need your **Mega Man X2 USA ROM**.
 Assets are extracted automatically on your machine.
 
+For **X2 / X3 Armor (experimental)**, enable it in **Mods**, choose the donor
+game in the **Armor** dropdown, and supply that game's USA ROM. X starts with
+the donor game's basic appearance and ground dash. X1's capsules unlock the
+matching donor parts; X3's four regular parts remain standard armor, and the
+Hadouken capsule also grants Gold Armor and its enhancements. The mod is off
+by default and has passed preliminary playtests.
+
 Select **Modern** under **Zero behavior** in either Zero mod for saber combat
 and extra aerial movement. **X3 Behavior** is the default. **Add Zero** and
 **X / Zero Co-op** are alternatives; enabling one disables the other.
+
+All Zero styles can break blocks with their head and feet from the start,
+including in co-op. X still needs his corresponding armor upgrades.
 
 For widescreen, enable **Widescreen** in Mods and choose your view aspect.
 **Display Aspect** in Settings controls pixel proportions. Netplay uses the
@@ -123,6 +135,33 @@ original view or fixed 16:9, 21:9, or 32:9.
 Setup guides: [Zero](docs/zero-0.0.1.md), [X2/X3 weapons](docs/x-weapons-port.md),
 [password saves](docs/password-saves.md), and [netplay](docs/netplay.md).
 No ROMs or extracted assets are included in the downloads.
+
+For Storm Eagle's speedrun trick and local practice saves, see the
+[Magic Carpet guide](docs/magic-carpet.md).
+
+### Which ROM?
+
+The game needs the **v1.1 (Rev 1)** cartridge dump. The original v1.0 release
+has different code and is refused. Checksums are for the ROM without a
+512-byte copier header; the launcher removes the header before checking.
+
+| Use for | No-Intro name | SHA-256 | SHA-1 | CRC32 |
+|---|---|---|---|---|
+| Game | Mega Man X (USA) (Rev 1) | `b8f70a6e7fb93819f79693578887e2c11e196bdf1ac6ddc7cb924b1ad0be2d32` | `c65216760ba99178100a10d98457cf11496c2097` | `DED53C64` |
+| Zero, co-op, X3 weapons/armor | Mega Man X3 (USA) | `65b03268afac296330e8ff8d60dd0825879e13ed658b37713c034a3bd074f1d7` | `b226f7ec59283b05c1e276e2f433893f45027cac` | `FA0FE671` |
+| X2 weapons/armor | Mega Man X2 (USA) | `f3246755f608a1e1dc9c848b61da3b824c7853b29b3be40df6fc7f2793a887ed` | `637079014421563283cded6aeaa0604597b2e33c` | `947B0355` |
+
+If the launcher refuses a ROM, it says which dump you picked and what it
+needs. For example: *"This is Mega Man X (USA) v1.0. Mega Man X needs Mega Man
+X (USA) v1.1 (Rev 1) (SHA-256 b8f70a6e…)"*. It recognizes v1.0, the European
+and Japanese releases, the Legacy Collection and Mega Man X Collection
+extracts, and X2/X3 picked in the wrong place. An unknown file is described by
+its internal header, which also shows whether the ROM has been patched. ZIP
+and 7z archives are reported too, so extract the ROM first. **Copy details**
+copies your file's checksums for a bug report.
+
+Do not pick a ROM patched for MSU-1, a translation or a hack. MSU-1 music,
+Zero and co-op are added through **Mods**.
 
 ## Controls and co-op
 
@@ -136,6 +175,14 @@ for 1.5 seconds to withdraw, and tap it to rejoin. A player who dies can tap
 **Select** to respawn beside the partner for one of the team's lives. Respawns
 are not available during boss or miniboss fights; the request waits until the
 fight is over, or until a 1-up is collected if no lives are left.
+
+For younger or new players, turn on the **Player 2 Learner Mode** mod (it
+turns co-op on with it). Player 2 then cannot lose health or die: pits,
+spikes and falling behind off-screen beam them back beside Player 1, and
+Player 1 never waits for them. The camera follows Player 1 only, and Player 2
+cannot pause, open doors, board Ride Armor or take over the stage. Player 1's
+death restarts the team as in single player. Player 2's health bar is hidden;
+**Show Player 2 health bar** brings it back.
 
 Reopen the launcher during play with **Ctrl+L** or controller **Select+L3**.
 Configure system shortcuts in **Hotkeys**. **F7** opens the save-state browser
@@ -153,7 +200,20 @@ Windows diagnostics are saved beside the executable in
 If a crash produced `crash_report_*.json` or `crash_minidump_*.dmp`, include
 those too. Grab the reports before running the game again.
 
-For netplay connection problems, enable the **Tier 2 diagnostics** mod
+On Linux, check `logs/` beside the AppImage or compiled executable. If that
+directory is read-only, the startup log falls back to
+`$XDG_STATE_HOME/MegaManXSNESRecomp/logs` (normally
+`~/.local/state/MegaManXSNESRecomp/logs`), then `/tmp/MegaManXSNESRecomp`.
+Set `MMX_REPLAY_DIR` to an existing writable folder to choose where replay
+segments and their sidecars are recorded.
+
+Netplay disconnect details and long application stalls are logged automatically
+in the session log. They distinguish a received peer goodbye from a timeout,
+report the age of the last peer packet, and identify long gaps in network
+processing or slow replay recording. Collect the session logs from both players
+when a match disconnects; no Developer mod needs to be enabled.
+
+For additional connection detail, enable the **Tier 2 diagnostics** mod
 (Developer group) before hosting or joining. Each match then writes
 `saves/netplay/net_diag.jsonl` (the transport, whether ICE connected directly,
 through STUN or through TURN, and any stalls); attach it with the log. The
@@ -168,9 +228,10 @@ needs to be enabled. When a problem occurs, stop playing and zip the session's
 During netplay, collect the files from both players if possible. Describe what
 happened and roughly when. Keep your source ROMs out of the attachment.
 
-The newest six replay segments are kept (normally about a minute of gameplay;
-rollback or frequent state loads can shorten this). Each segment is capped at
-600 frame executions or 16 MiB of checkpoints. Run-ahead currently suspends
+Replay history keeps up to **one hour** (360 segments), with a **256 MiB budget
+for machine checkpoints** plus the bounded input/settings sidecars. Rollback or
+frequent state loads can shorten this window. Each segment is capped at 600
+frame executions or 16 MiB of checkpoints. Run-ahead currently suspends
 replay capture; turn it off while collecting a report. To opt out of automatic
 recording, set the environment variable `MMX_REPLAY_RECORD=0` and leave the
 Developer diagnostic options disabled.
@@ -179,11 +240,19 @@ For extra detail, enable **Co-op physics diagnostics** or **Tier 2 diagnostics**
 under **Mods > Developer**. These optional detailed traces remain off by default;
 the rolling replay capture runs without them.
 
+Replay writes and state hashing run on a background worker using a fixed 16 MiB
+queue. Each detailed CSV trace has a fixed 4 MiB queue. If storage falls behind
+or fails, the affected recording stops with an explicit runtime-log warning;
+gameplay does not wait for the writer and the queue cannot keep growing.
+Quit normally to drain accepted records before zipping the logs. An abrupt
+process kill can lose the unflushed tail (replay flushes run every 100 ms).
+
 The existing collision trace is written in 32 MiB
 numbered segments (`logs/coop-physics-<start time>-<pid>-<n>-001.csv`, `-002.csv`,
 ...); the newest 32 are kept. Attach every segment of the session. During netplay
 the same mod also writes `logs/coop-netplay-*` segments with the same name stem;
 attach those too, from both players if possible.
+CSV writes, flushing and rotation also run on background workers.
 
 Developers can reproduce a capture with the same build and owned source ROMs:
 
@@ -201,6 +270,13 @@ as incomplete, never as a successful replay. Playback executes that final input
 so the original hang/crash can recur under a debugger. The format preserves actual
 rollback executions and restored checkpoints, so do not deduplicate frame
 numbers as an input-only CSV route would.
+
+New recordings use format 2 with the original ROM's identity, independent of
+temporary character collision-table patches. The helper also accepts format 1;
+legacy ROM validation reconstructs known collision-table variants and still
+rejects a different ROM. This workflow follows X4's
+[Playtest Diagnostics](https://github.com/mstan/MegaManX4Recomp/pull/19); the shared
+bounded writer implementation lives in snesrecomp.
 
 The ROM-backed acceptance suite is `tests/test_diagnostic_replay.py`; build
 with `-DMMX_STATE_TESTS=ON` and supply `--state-tests`, `--game`, `--rom`,

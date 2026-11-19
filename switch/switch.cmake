@@ -12,7 +12,7 @@
 set(MMX_SWITCH_APP_TITLE "Mega Man X Recompiled" CACHE STRING "NRO title")
 set(MMX_SWITCH_APP_AUTHOR "Thorhax" CACHE STRING "NRO author" FORCE)
 # The Switch port's own release number (the upstream game is PROJECT_VERSION).
-set(MMX_SWITCH_APP_VERSION "1.2.0" CACHE STRING "NRO version" FORCE)
+set(MMX_SWITCH_APP_VERSION "1.3.0" CACHE STRING "NRO version" FORCE)
 option(MMX_SWITCH_LAUNCHER "Include the Dear ImGui launcher (Mods, Controls, Settings)" ON)
 set(MMX_SWITCH_ICON "${CMAKE_CURRENT_LIST_DIR}/icon.jpg" CACHE FILEPATH "NRO icon (256x256 JPEG)")
 
@@ -51,7 +51,7 @@ function(mmx_switch_target target)
     set(_mmx_hot_sources
         src/mmx_renderer.c src/mmx_render_assets.c src/mmx_display.c
         src/mmx_wide_policy.c src/mmx_zero.c src/mmx_weapons.c
-        src/mmx_weapon_combat.c src/mmx_coop_view.c)
+        src/mmx_weapon_combat.c src/mmx_coop_view.c src/mmx_armor.c)
     set_source_files_properties(${_mmx_hot_sources} PROPERTIES
         COMPILE_OPTIONS "-O3;-flto")
     target_link_options(${target} PRIVATE -flto=4 -O3)

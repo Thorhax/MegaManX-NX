@@ -6,11 +6,13 @@
 #include "desktop/config.h"
 #include "snes/ppu.h"
 #include "snes/snes.h"
+#include "snes/apu.h"
 #include "snes/ws_shadow.h"
 #include "widescreen.h"
 #include "mmx_rtl.h"
 #include "mmx_display.h"
 #include "mmx_renderer.h"
+#include "mmx_armor.h"
 #include "mmx_zero.h"
 #include "mmx_knc_bugfix.h"
 #include "mmx_hitbox_overlay.h"
@@ -44,20 +46,39 @@
 #ifndef MMX_DESKTOP_ENTRY
 #define MMX_DESKTOP_ENTRY main
 #endif
+#ifndef MMX_NATIVE_BG_SPANS
+#define MMX_NATIVE_BG_SPANS 0
+#endif
+#ifndef MMX_NATIVE_ROW_PLAN
+#define MMX_NATIVE_ROW_PLAN 0
+#endif
 extern const RtlGameInfo kMmxGameInfo;
 extern int mmx_tier2_diagnostics_enabled(void);
 
 static bool s_render_valid;
+static uint64_t s_benchmark_native_lines;
+static uint32_t s_composed_pixels[kSnesDesktopMaxFrameWidth * 224];
+#if MMX_NATIVE_RASTER
+static bool s_composed_ready;
+static MmxRenderView s_composed_view;
+static bool s_composed_hud;
+static bool s_composed_split;
+#endif
+static bool MmxLocalSplit(void) {
+  return !MMX_VARIANT_JP && !MmxNetplayActive() &&
+      MmxCoopEnabled() && MmxCoopViewsLocalSplit();
+}
 static void MmxRomLoaded(const uint8_t *rom, size_t size) {
   if ((size & 0x7fff) == 512) { rom += 512; size -= 512; }
   MmxRendererSetRom(rom, size);
 }
 
 static void MmxPrepareFrame(int dw, int dh, int *w, int *h) {
+  bool split=MmxLocalSplit();
   /* A room has one logical field. Window size and each peer's offline pixel
    * preference cannot widen it. The offline setting is never overwritten. */
   SnesDisplayAspect aspect = SnesDisplayAspect_Clamp(MmxNetplayActive() ? 0 : g_config.display_aspect);
-  g_mmx_custom_renderer = !MMX_VARIANT_JP && (g_config.widescreen || MmxZeroEnabled() || MmxWeaponsEnabled() || MmxKncBugfixActive(0) || MmxKncBugfixActive(1) || MmxBossRushActive() || MmxBossRushGetState().menu || MmxRendererNeedsStormSkyRepair(g_ram));
+  g_mmx_custom_renderer = !MMX_VARIANT_JP && (split || g_config.widescreen || MmxZeroEnabled() || MmxWeaponsEnabled() || MmxArmorEnabled() || MmxKncBugfixActive(0) || MmxKncBugfixActive(1) || MmxBossRushActive() || MmxBossRushGetState().menu || MmxRendererNeedsStormSkyRepair(g_ram));
   g_mmx_custom_view = MmxRendererViewport(g_mmx_custom_aspect, dw, dh,
       aspect);
   if (!g_config.widescreen) {
@@ -66,8 +87,17 @@ static void MmxPrepareFrame(int dw, int dh, int *w, int *h) {
         aspect, &pw, &ph);
     g_mmx_custom_view = (MmxRenderView){256, 0, (double)pw / ph};
   }
+  if(split) {
+    double aspect = !g_config.widescreen ? 5.0/4 :
+        g_mmx_custom_aspect==MMX_ASPECT_16_9 ? 16.0/9 :
+        g_mmx_custom_aspect==MMX_ASPECT_21_9 ? 21.0/9 :
+        g_mmx_custom_aspect==MMX_ASPECT_32_9 ? 32.0/9 :
+        dw>0 && dh>0 ? (double)dw/(2*dh) : 5.0/4;
+    SnesDisplayFrame pane=SnesLocalViews_ComputePane(256,224,5.0/4,aspect);
+    g_mmx_custom_view=(MmxRenderView){pane.width,pane.extra,pane.aspect};
+  }
   MmxReplayViewport(&g_mmx_custom_view.width,&g_mmx_custom_view.extra);
-  *w = g_mmx_custom_renderer ? g_mmx_custom_view.width : 256;
+  *w = g_mmx_custom_renderer ? g_mmx_custom_view.width*(split?2:1) : 256;
   *h = 224;
 }
 void MmxDisplay_SetWidescreenEnabled(bool enabled) {
@@ -117,12 +147,16 @@ static void MmxBeforeFrame(void) {
 #if defined(__SWITCH__)
   MmxRenderModeHotkey();
 #endif
+#if SNESRECOMP_TRACE
+  MmxArmorDebugHostFrame();
+#endif
   if(!MmxReplayPlaying()) {
 #if SNESRECOMP_NET
-  MmxCoopViewsSetOnline(snes_netplay_active() && MmxCoopEnabled() && MmxCoopViewsIndependent());
-  MmxRendererSetPeerView(MmxCoopViewsOnline()?snes_netplay_local_slot():-1);
+  bool online=snes_netplay_active() && MmxCoopEnabled() && MmxCoopViewsIndependent();
+  MmxCoopViewsSetActive(online || MmxLocalSplit());
+  MmxRendererSetPeerView(online?snes_netplay_local_slot():-1);
 #else
-  MmxCoopViewsSetOnline(false);MmxRendererSetPeerView(-1);
+  MmxCoopViewsSetActive(MmxLocalSplit());MmxRendererSetPeerView(-1);
 #endif
   }
   /* MMX's draw hook runs the original per-line HDMA sequence itself. */
@@ -140,6 +174,9 @@ static void MmxResetRenderer(void) {
   MmxKncBugfixReset();
   MmxRendererReset();
   s_render_valid = false;
+#if MMX_NATIVE_RASTER
+  s_composed_ready=false;
+#endif
 }
 static void MmxBeginFrame(unsigned number) {
   (void)number;
@@ -162,15 +199,43 @@ static void MmxBeginFrame(unsigned number) {
 static void MmxEndFrame(const uint8_t *field, unsigned number) {
   if (!g_mmx_custom_renderer) return;
   s_render_valid = MmxRendererEndFrame((const uint32_t *)field);
+  s_benchmark_native_lines+=MmxRendererNativeLines();
   const char *capture = getenv("MMX_RENDER_CAPTURE");
   const char *after = getenv("MMX_RENDER_CAPTURE_FRAME");
   if (capture && number == (unsigned)(after ? atoi(after) : 1))
     MmxRendererSaveCapture(capture);
 }
+#if MMX_NATIVE_RASTER
+static void MmxPublishNativeField(uint8_t *field, unsigned number) {
+  (void)number;
+  if (!g_mmx_custom_renderer) { s_composed_ready=false; return; }
+  s_composed_ready=false;
+  if (s_render_valid) {
+    bool split=MmxLocalSplit();
+    int width=g_mmx_custom_view.width*(split?2:1);
+    bool ok=split ? MmxRendererDrawLocalPair((uint8_t *)s_composed_pixels,(size_t)width*4,
+        g_mmx_custom_view,g_mmx_custom_hud) :
+        MmxRendererDraw(s_composed_pixels,g_mmx_custom_view,g_mmx_custom_hud);
+    if (!ok)
+      Die("Native frame composition failed");
+    s_composed_view=g_mmx_custom_view; s_composed_hud=g_mmx_custom_hud;
+    s_composed_split=split;
+    s_composed_ready=true;
+    /* This is the primary native-width field consumed by screenshots,
+     * snapshots and overlays. The independent original field remains
+     * available through MmxRendererStockFrame's explicit readback. */
+    for (unsigned y=0;y<224;++y)
+      memcpy((uint32_t *)field+y*256,
+          s_composed_pixels+y*width+g_mmx_custom_view.extra,256*4);
+  } else if (MmxRendererNativeLines()) {
+    Die("Native raster capture did not complete");
+  }
+}
+#endif
 static int MmxDrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
                         int w, int h, double alpha) {
   (void)alpha;
-  static uint32_t output[MMX_RENDER_MAX_WIDTH * 224];
+  uint32_t *output=s_composed_pixels;
   if (!g_mmx_custom_renderer) {
     /* The overlay never enables the compositor: that also widens culling
      * and spawn policy, which would make a drawing aid change the game. */
@@ -178,7 +243,31 @@ static int MmxDrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
     RtlWidescreenPresent(dst, pitch, (const uint8_t *)output, w, h);
     return 1;
   }
-  if (!s_render_valid || !MmxRendererDraw(output, g_mmx_custom_view, g_mmx_custom_hud)) {
+  if(MmxLocalSplit()) {
+    if(h!=224 || w!=2*g_mmx_custom_view.width) return 0;
+#if MMX_NATIVE_RASTER
+    bool ready=s_composed_ready && s_composed_split &&
+        s_composed_view.width==g_mmx_custom_view.width &&
+        s_composed_view.extra==g_mmx_custom_view.extra && s_composed_hud==g_mmx_custom_hud;
+    s_composed_ready=false;
+    if(s_render_valid && ready) {RtlWidescreenPresent(dst,pitch,(const uint8_t *)output,w,h);return 1;}
+#endif
+    if(s_render_valid && MmxRendererDrawLocalPair(dst,pitch,g_mmx_custom_view,g_mmx_custom_hud)) return 1;
+    /* No private raster yet (boot, shared frontend, reset/load): publish the
+     * same current canonical frame in both panes, never one stale camera. */
+    int pane=w/2;
+    memset(output,0,(size_t)pane*h*sizeof(*output));
+    for(int y=0;y<h;++y)
+      memcpy(output+y*pane+(pane-256)/2,field+y*256*4,256*4);
+    return SnesLocalViews_ComposeSideBySide(dst,pitch,pane,h,output,(size_t)pane*4,NULL,0);
+  }
+  bool ready=false;
+#if MMX_NATIVE_RASTER
+  ready=s_composed_ready && !s_composed_split && s_composed_view.width==g_mmx_custom_view.width &&
+      s_composed_view.extra==g_mmx_custom_view.extra && s_composed_hud==g_mmx_custom_hud;
+  s_composed_ready=false;
+#endif
+  if (!s_render_valid || (!ready && !MmxRendererDraw(output, g_mmx_custom_view, g_mmx_custom_hud))) {
     memset(output, 0, (size_t)w * h * sizeof(*output));
     for (int y = 0; y < h; ++y)
       memcpy(output + y * w + (w - 256) / 2, field + y * 256 * 4, 256 * 4);
@@ -195,11 +284,19 @@ static int MmxDrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
   return 1;
 }
 static void MmxViewport(int w, int h, int dw, int dh, SnesDisplayViewport *view) {
-  if (g_mmx_custom_renderer) *view = MmxRendererDestination(g_mmx_custom_view, dw, dh);
+  if(MmxLocalSplit()) *view=SnesLocalViews_Viewport(g_mmx_custom_view.aspect,dw,dh);
+  else if (g_mmx_custom_renderer) *view = MmxRendererDestination(g_mmx_custom_view, dw, dh);
   else MmxDisplay_ComputeViewport(w, h, dw, dh,
       SnesDisplayAspect_Clamp(g_config.display_aspect), g_config.ignore_aspect_ratio, false, view);
 }
 static int MmxWindowWidth(int w) {
+  if(MmxLocalSplit()) {
+    double aspect=!g_config.widescreen ? 5.0/4 :
+        g_mmx_custom_aspect==MMX_ASPECT_21_9 ? 21.0/9 :
+        g_mmx_custom_aspect==MMX_ASPECT_32_9 ? 32.0/9 :
+        g_mmx_custom_aspect==MMX_ASPECT_16_9 ? 16.0/9 : g_mmx_custom_view.aspect;
+    return (int)(2*aspect*MmxDisplay_GetWindowBaseHeight()+.5);
+  }
   return MmxDisplay_GetWindowBaseWidth(w, SnesDisplayAspect_Clamp(MmxNetplayActive() ? 0 : g_config.display_aspect));
 }
 
@@ -253,9 +350,14 @@ static void MmxAfterFrame(const SnesDesktopHostFrameStats *stats) {
   if (s_benchmark_frames && stats->frame == (unsigned)s_benchmark_frames) {
     double seconds = stats->run_seconds;
     printf("SNESRECOMP_BENCHMARK {\"game\":\"Mega Man X\",\"frames\":%u,"
-           "\"seconds\":%.9f,\"fps\":%.3f,\"ms_per_frame\":%.6f}\n",
+           "\"seconds\":%.9f,\"fps\":%.3f,\"ms_per_frame\":%.6f,\"native_raster_lines\":%llu,"
+           "\"apu_time_impl\":\"%s\",\"raster_impl\":\"%s\",\"row_plan\":%s,\"background_spans\":%s,\"audio_output\":%s}\n",
            stats->frame, seconds, stats->frame / seconds,
-           seconds * 1000.0 / stats->frame);
+           seconds * 1000.0 / stats->frame,(unsigned long long)s_benchmark_native_lines,
+           apu_time_implementation(), MMX_NATIVE_RASTER ? "NATIVE" : "LLE",
+           MMX_NATIVE_RASTER && MMX_NATIVE_ROW_PLAN ? "true" : "false",
+           MMX_NATIVE_RASTER && MMX_NATIVE_ROW_PLAN && MMX_NATIVE_BG_SPANS ? "true" : "false",
+           s_benchmark_audio ? "true" : "false");
   }
 }
 
@@ -365,7 +467,18 @@ static const SnesRomRevision kMmxRomCatalog[] = {
 #undef MMX_X2_NOTE
 #undef MMX_X3_NOTE
 
+static void MmxConfigureLauncher(struct RecompLauncherCGameInfo *info) {
+  MmxArmorConfigureLauncher(info);
+  MmxNetplayConfigureLauncher(info);
+}
+static bool MmxArmorBusterSelected(void) {return !MmxWeaponsCombatActive();}
+static uint8_t *MmxArmorBody(uint8_t *ram) {
+  return MmxCoopEnabled()?MmxCoopCharacterBody(ram,MMX_COOP_X):MmxZeroActive()?NULL:ram+0xba8;
+}
 int MMX_DESKTOP_ENTRY(int argc, char **argv) {
+  MmxArmorSetBusterQuery(MmxArmorBusterSelected);
+  MmxArmorSetActorQuery(MmxCoopActorIsX);
+  MmxArmorSetBodyQuery(MmxArmorBody);
   MmxStartupLogging();
   for(int arg=1;arg+1<argc;++arg)
     if(!strcmp(argv[arg],"--config")) MmxReplaySetConfigPath(argv[arg+1]);
@@ -434,12 +547,15 @@ int MMX_DESKTOP_ENTRY(int argc, char **argv) {
     .create_spc_player = SmwSpcPlayer_Create,
     .prepare_frame = MmxPrepareFrame, .begin_sim_frame = MmxBeginFrame,
     .draw_frame = MmxDrawFrame, .end_sim_frame = MmxEndFrame,
+#if MMX_NATIVE_RASTER
+    .publish_native_field = MmxPublishNativeField,
+#endif
     .before_run_frame = MmxBeforeFrame, .on_reset = MmxResetRenderer,
     .on_rom_loaded = MmxRomLoaded, .compute_viewport = MmxViewport,
     .window_base_width = MmxWindowWidth,
     .window_base_height = MmxDisplay_GetWindowBaseHeight,
     .after_config = MmxAfterConfig, .after_run_frame = MmxAfterFrame,
-    .configure_launcher = MmxNetplayConfigureLauncher,
+    .configure_launcher = MmxConfigureLauncher,
     .prepare_netplay = MmxNetplayPrepare,
     .netplay_ready = MmxNetplayReady,
     .on_shutdown = MmxShutdown,

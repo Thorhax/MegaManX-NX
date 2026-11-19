@@ -3,6 +3,7 @@
 #include "mmx_wide_policy.h"
 #include "mmx_renderer.h"
 #include "mmx_zero.h"
+#include "mmx_armor.h"
 #include "mmx_weapons.h"
 #include "mmx_weapon_combat.h"
 #include "mmx_coop.h"
@@ -379,7 +380,7 @@ void mmx_host_yield(uint8_t countdown) {
 #include "snes/saveload.h"
 
 #define MMX_SAV_CHUNK_MAGIC   0x4D4D5854u  /* "MMXT" */
-#define MMX_SAV_CHUNK_VERSION 22u /* per-seat authored camera bounds */
+#define MMX_SAV_CHUNK_VERSION 25u /* independent native camera pan history */
 
 typedef struct MmxSavChunk {
   uint32_t magic, version;
@@ -414,6 +415,7 @@ static MmxWeaponsState g_load_weapons;
 static MmxWeaponCombatState g_load_weapon_combat;
 static MmxCoopState g_load_coop;
 static MmxKncBugfixState g_load_knc_bugfix;
+static MmxArmorState g_load_armor;
 static MmxCoopViewWorldState g_load_views;
 static MmxCoopViewBoundsState g_load_view_bounds;
 static uint8_t g_load_zero_extension[MMX_ZERO_EXTENSION_STATE_BYTES];
@@ -478,6 +480,8 @@ void MmxStateSaveExtra(struct SaveLoadInfo *sli) {
   sli->func(sli,&visual,sizeof(visual));
   MmxCoopViewBoundsState bounds=MmxCoopViewsGetBoundsState();
   sli->func(sli,&bounds,sizeof(bounds));
+  MmxArmorState armor=MmxArmorGetState();
+  sli->func(sli,&armor,sizeof(armor));
 }
 
 void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
@@ -489,6 +493,7 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
   memset(&g_load_weapon_combat, 0, sizeof(g_load_weapon_combat));
   memset(&g_load_coop, 0, sizeof(g_load_coop));
   memset(&g_load_knc_bugfix,0,sizeof(g_load_knc_bugfix));
+  memset(&g_load_armor,0,sizeof(g_load_armor));
   memset(&g_load_views,0,sizeof(g_load_views));
   memset(&g_load_view_bounds,0,sizeof(g_load_view_bounds));
   memset(g_load_zero_extension,0,sizeof(g_load_zero_extension));
@@ -498,7 +503,8 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
   memset(&g_load_chunk, 0, sizeof(g_load_chunk));
   sli->func(sli, &g_load_chunk, sizeof(g_load_chunk));
   if (g_load_chunk.magic == MMX_SAV_CHUNK_MAGIC &&
-      g_load_chunk.version >= 1 && g_load_chunk.version <= MMX_SAV_CHUNK_VERSION)
+      g_load_chunk.version >= 1 && (g_load_chunk.version<22 || g_load_chunk.version>=25) &&
+      g_load_chunk.version <= MMX_SAV_CHUNK_VERSION)
     g_load_chunk_ok = 1;
   /* The adaptive playtest wrote a 464-byte v2 chunk, while the shared-host
    * branch used v2 with appended execution/CHR data. Only the latter has a
@@ -579,7 +585,8 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
         (g_load_chunk.version==18 && remaining==sizeof(g_load_zero_extension));
     bool rush=g_load_chunk.version>=21 || !extension;
     size_t expected=(extension?sizeof(g_load_zero_extension):0)+(rush?rush_bytes:0)+
-        (g_load_chunk.version>=22?sizeof(g_load_view_bounds):0);
+        (g_load_chunk.version>=22?sizeof(g_load_view_bounds):0)+
+        (g_load_chunk.version>=24?sizeof(g_load_armor):0);
     if(remaining!=expected) g_load_chunk_ok=0;
     if(g_load_chunk_ok && extension)
       sli->func(sli,g_load_zero_extension,sizeof(g_load_zero_extension));
@@ -602,6 +609,13 @@ void MmxStateLoadExtra(struct SaveLoadInfo *sli, uint32_t version) {
   }
   if(g_load_complete && g_load_chunk.version<16)
     g_load_views.contact_player=g_load_coop.anchor;
+  if(g_load_complete && g_load_chunk_ok && g_load_chunk.version>=23) {
+    if(RtlStateBytesRemaining(sli)<sizeof(g_load_armor))g_load_chunk_ok=0;
+    else {
+      sli->func(sli,&g_load_armor,sizeof(g_load_armor));
+      if(!MmxArmorValidState(&g_load_armor))g_load_chunk_ok=0;
+    }
+  }
   if (!g_load_chunk_ok)
     fprintf(stderr, "[mmx_state] load: bad game chunk (magic=%08x ver=%u)\n",
             g_load_chunk.magic, g_load_chunk.version);
@@ -639,6 +653,7 @@ void MmxOnStateLoaded(uint32_t version) {
   g_first_frame_done = complete ? g_load_frame_flags[1] != 0 : true;
   MmxWideStateApply(complete);
   MmxZeroSetState(g_load_zero);
+  MmxArmorSetState(g_load_armor);
   if (complete) MmxZeroExtLoadState(g_load_zero_extension);
   MmxWeaponsSetState(g_load_weapons);
   MmxWeaponsSetCombatState(g_load_weapon_combat);
@@ -928,10 +943,17 @@ void MmxDrawPpuFrame(void) {
   if (g_mmx_custom_renderer) MmxRendererBeginHardwareRaster(g_ppu);
   for (int i = 0; i <= 224; i++) {
     if (g_mmx_custom_renderer) MmxRendererCaptureLine(g_ppu, i);
-    g_ppu_skip_line_pixels = g_mmx_custom_renderer && !g_mmx_native_raster &&
-        MmxRendererCapturedLineIsCustom(g_ppu, (unsigned)i);
-    g_ppu_skip_line_sprites = g_ppu_skip_line_pixels;
-    ppu_runLine(g_ppu, i);
+#if MMX_NATIVE_RASTER
+    if (g_mmx_custom_renderer && MmxRendererClaimNativeLine(g_ppu, (unsigned)i))
+      ppu_runLineState(g_ppu, i);
+    else
+#endif
+    {
+      g_ppu_skip_line_pixels = g_mmx_custom_renderer && !g_mmx_native_raster &&
+          MmxRendererCapturedLineIsCustom(g_ppu, (unsigned)i);
+      g_ppu_skip_line_sprites = g_ppu_skip_line_pixels;
+      ppu_runLine(g_ppu, i);
+    }
     SimpleHdma_DoLine(&hdma_chans[0]);
     SimpleHdma_DoLine(&hdma_chans[1]);
     SimpleHdma_DoLine(&hdma_chans[2]);
@@ -1086,6 +1108,17 @@ void RunOneFrameOfGame(void) {
     }
   }
   cpu_trace_px_breadcrumb(&g_cpu, 0x2002, "before_Internal");
+  if(MmxArmorEnabled()) {
+    uint16_t pad=RtlGetPadState(0);bool available=!MmxZeroActive();
+    if(MmxCoopEnabled()) {
+      MmxCoopState coop=MmxCoopGetState();
+      if(coop.initialized) {
+        unsigned seat=coop.players[0].character==MMX_COOP_X?0:1;
+        pad=RtlGetPadState(seat);available=coop.players[seat].status==MMX_COOP_ALIVE;
+      }
+    }
+    if(MmxArmorFrameTick(g_ram,pad,available))return;
+  }
   MmxBossRushFrame(g_ram,RtlGetPadState(0));
   if(MmxBossRushGetState().mode==MMX_RUSH_FINISHED) return;
   MmxKncBugfixTick(g_ram,RtlGetPadState(0),RtlGetPadState(1));
@@ -1502,7 +1535,7 @@ void MmxWsSpawnRunNativePass(CpuState *cpu) {
  * and collected flags; an owned upgrade's capsule still removes itself. */
 static void MmxCoopCapsulePass(CpuState *cpu) {
   extern uint8_t g_ram[0x20000];
-  if (!MmxCoopEnabled() || MmxCoopViewsOnline() || !MmxWidePolicy_IsStageScene(g_ram)) return;
+  if (!MmxCoopEnabled() || MmxCoopViewsActive() || !MmxWidePolicy_IsStageScene(g_ram)) return;
   MmxCoopState coop = MmxCoopGetState();
   if (!coop.initialized || coop.menu_owner || coop.scene_owner) return;
   int seat = -1;
@@ -2126,6 +2159,7 @@ static void MmxWideStateApply(bool loaded) {
  * recovers (GitHub #45). Runs on the main fiber, never inside a slot fiber,
  * so every slot fiber can be deleted here. */
 void MmxOnHardwareReset(void) {
+  MmxArmorResetState();
   MmxBossRushReset();MmxBossRushAudioReset();
   MmxCoopReset();
   for (int i = 0; i < MMX_NSLOTS; i++) {

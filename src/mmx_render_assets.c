@@ -178,9 +178,14 @@ static const MmxSpriteAsset *MmxRenderAssetsNativeShot_unlocked(const uint8_t ra
   if(!weapon) return NULL;
   const MmxSpriteAsset *base=MmxRenderAssetsWeaponX_unlocked(weapon,false);
   if(!base) return NULL;
-  unsigned table=ram_word(ram,object+0x31);
-  uint64_t key=((uint64_t)kind<<48)|((uint64_t)group<<40)|((uint64_t)table<<24)|
-      (pose<<8)|1;
+  /* $84:8FCA consumes bit 7 of the pose when it queues CHR. Static
+   * animations leave it set and do not initialize $31: that field can still
+   * name a charged buster's directory from an earlier slot occupant. */
+  unsigned table=ram[object+23]&128 ? 0 : ram_word(ram,object+0x31);
+  unsigned base_tile=ram[object+24];
+  unsigned source_offset=ram_word(ram,0x18000+ram[object+16]*2);
+  uint64_t key=((uint64_t)source_offset<<48)|((uint64_t)base_tile<<40)|
+      ((uint64_t)kind<<32)|((uint64_t)table<<16)|((uint64_t)group<<8)|(pose<<1)|1;
   unsigned slot=(object-0x1228)/64;
   MmxSpriteAsset *art=&native_shots[seat][slot];
   if(native_shot_keys[seat][slot]==key) return art;
@@ -198,8 +203,11 @@ static const MmxSpriteAsset *MmxRenderAssetsNativeShot_unlocked(const uint8_t ra
         if(!range(list,5)) return NULL;
         unsigned count=rom[list]*16;
         if(!count) {complete=true;break;}
-        int dest=(rom[list+4]&127)*512-0xc000;
-        size_t source=lorom(word(list+1)|(rom[list+3]<<16));
+        /* $84:8FCA relocates both the resource source and the object's
+         * destination tile base. Tornado keeps its two muzzle tiles while
+         * streaming the traveling body at base $02. */
+        int dest=(rom[list+4]&127)*512+base_tile*32-0xc000;
+        size_t source=lorom(((word(list+1)+source_offset)&0xffff)|(rom[list+3]<<16));
         if(dest<0 || dest+(int)count>sizeof(art->tiles) || !range(source,count) || rom[list+3]==0x7f)
           return NULL;
         memcpy(art->tiles+dest,rom+source,count);
@@ -914,6 +922,10 @@ unsigned MmxRenderAssetsDeathPaletteFade(const uint8_t ram[0x20000], const uint1
   if (!ram || !colors || (ram[0xd3] != 4 && ram[0xd3] != 6 && ram[0xd3] != 8) ||
       !prepare_background(ram)) return 0;
   const MmxBackgroundPalette *base = background_palette(ram[0x1f0a] & 15);
+  /* With no owned color to compare, every transform would match. */
+  unsigned owned = 0;
+  for (unsigned i = 0; i < 128; ++i) owned += (i & 15) && base->valid[i];
+  if (!owned) return 0;
   /* Death adds the same saturating RGB amount to the live palettes, and so do
    * a defeated Maverick's white flashes. Infer only an exact transform of
    * every owned opaque color, from captured CGRAM (RAM can be a DMA ahead),
@@ -1054,4 +1066,34 @@ const MmxSpriteAsset *MmxRenderAssetsNativeShot(const uint8_t ram[0x20000],
   const MmxSpriteAsset * result = MmxRenderAssetsNativeShot_unlocked(ram, object, group, pose, seat);
   assets_unlock();
   return result;
+}
+
+unsigned MmxRenderAssetsBindBackground(const uint8_t ram[0x20000],
+    int world_x, int step, unsigned vram_word, unsigned count, bool use_chr,
+    int palette_phase, MmxBackgroundBinding *binding) {
+  if (!binding || !ram || !count || count > 1024 || step < -2 || step > 2) return 0;
+  binding->tile = use_chr ? MmxRenderAssetsBackgroundTile(ram, world_x, vram_word) : NULL;
+  binding->palette = palette_phase >= 0 ?
+      MmxRenderAssetsBackgroundPalettePhase(ram, (unsigned)palette_phase) :
+      MmxRenderAssetsBackgroundPalette(ram, world_x);
+  if (!step || count == 1) return count;
+  unsigned stage = ram[0x1f7a];
+  bool chr = use_chr && (stage == 0 || stage == 1);
+  bool palette = palette_phase < 0 &&
+      (stage == 0 || stage == 1 || stage == 2 || stage == 4 || stage == 8);
+  if ((!chr && !palette) || !prepare_background(ram)) return count;
+  /* Resource events need not share a tile boundary. Check their prepared
+   * column phases, without repeating map/CHR/palette resolution per pixel.
+   * An invalid column is a distinct binding so crossing into/out of ROM's
+   * authored 8192px resource range also ends the span. */
+  bool valid = world_x >= 0 && world_x < 8192;
+  unsigned chr_phase = valid ? bg_phase[0][world_x] : 16;
+  unsigned pal_phase = valid ? bg_phase[1][world_x] : 16;
+  for (unsigned i = 1; i < count; ++i) {
+    int64_t next = (int64_t)world_x + (int64_t)i * step;
+    bool next_valid = next >= 0 && next < 8192;
+    if ((chr && (next_valid ? bg_phase[0][next] : 16) != chr_phase) ||
+        (palette && (next_valid ? bg_phase[1][next] : 16) != pal_phase)) return i;
+  }
+  return count;
 }

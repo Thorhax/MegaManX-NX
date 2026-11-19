@@ -2,9 +2,11 @@
 #include "diagnostics/replay_writer.h"
 #include "mmx_coop.h"
 #include "mmx_coop_view.h"
+#include "mmx_netplay.h"
 #include "mmx_coop_trace.h"
 #include "mmx_renderer.h"
 #include "mmx_zero.h"
+#include "mmx_armor.h"
 #include "mmx_weapons.h"
 #if !MMX_VARIANT_JP
 #include "saber/mmx_saber_plugin.h"
@@ -79,6 +81,7 @@ static bool init_stem(void);
 static unsigned mods(void) {
   unsigned m=MmxZeroEnabled() | MmxCoopEnabled()<<1 | MmxZeroModern()<<2 |
       MmxWeaponsPageEnabled(1)<<3 | MmxWeaponsPageEnabled(2)<<4;
+  if(MmxArmorEnabled())m|=(MmxArmorGame()-1)<<6;
 #if !MMX_VARIANT_JP
   m |= MmxSaberEnabled()<<5;
 #endif
@@ -89,7 +92,8 @@ static unsigned mods(void) {
 static unsigned policy(void) {
   return g_config.widescreen | g_mmx_custom_renderer<<1 | g_config.new_renderer<<2 |
       g_config.no_sprite_limits<<3 | MmxCoopViewsIndependent()<<4 |
-      rtl_apu_extended_frame_timing()<<5 | MmxCoopViewsOnline()<<6;
+      rtl_apu_extended_frame_timing()<<5 | MmxCoopViewsActive()<<6 |
+      (!MmxNetplayActive() && MmxCoopEnabled() && MmxCoopViewsLocalSplit())<<7;
 }
 void MmxReplayViewport(int *width,int *extra) {
   if(playing && playback_loaded) { *width=playback_width; *extra=(playback_width-256)/2; }
@@ -141,7 +145,7 @@ static void hashes(uint32_t *w, uint32_t *c, uint32_t *v, uint32_t *p) {
   MmxCoopViewWorldState views=MmxCoopViewsGetWorldState();
   *w=hash(g_ram,0x20000); *c=hash(&coop,sizeof(coop)); *v=hash(&views,sizeof(views));
   MmxCoopViewBoundsState bounds=MmxCoopViewsGetBoundsState();
-  if(playback_format>=3 && bounds.valid) *v=hash_continue(*v,&bounds,sizeof(bounds));
+  if(playback_format>=3 && (bounds.valid || bounds.camera_valid)) *v=hash_continue(*v,&bounds,sizeof(bounds));
   *p=hash(g_ppu->vram,sizeof(g_ppu->vram));
 }
 static void error(const char *why) {
@@ -349,7 +353,7 @@ static uint32_t playback_begin(uint32_t inputs) {
       playback_rom_verified=true;
     }
   }
-  if(!playback_checkpointed || sscanf(line,"I %u %x %x %d %d",&frame,&word,&flags,&width,&peer)!=5 || flags>127 ||
+  if(!playback_checkpointed || sscanf(line,"I %u %x %x %d %d",&frame,&word,&flags,&width,&peer)!=5 || flags>255 ||
       width<256 || width>MMX_RENDER_MAX_WIDTH || (width&1) || peer < -1 || peer>1) {
     error("invalid input record"); return inputs;
   }
@@ -358,7 +362,8 @@ static uint32_t playback_begin(uint32_t inputs) {
   }
   g_config.widescreen=(flags&1)!=0; g_mmx_custom_renderer=(flags&2)!=0;
   g_config.new_renderer=(flags&4)!=0; g_config.no_sprite_limits=(flags&8)!=0;
-  MmxCoopViewsSetIndependent((flags&16)!=0); MmxCoopViewsSetOnline((flags&64)!=0);
+  MmxCoopViewsSetIndependent((flags&16)!=0); MmxCoopViewsSetActive((flags&64)!=0);
+  MmxCoopViewsSetLocalSplit((flags&128)!=0);
   if(flags&32) RtlEnableExtendedFrameTiming();
   if(!!(flags&32)!=rtl_apu_extended_frame_timing()) { error("frame timing mode differs"); return inputs; }
   MmxRendererSetPeerView(peer); playback_width=width;
@@ -453,7 +458,7 @@ void MmxReplayEnd(void) {
     MmxCoopViewBoundsState bounds=MmxCoopViewsGetBoundsState();
     uint8_t views[sizeof(world)+sizeof(bounds)];
     memcpy(views,&world,sizeof(world));memcpy(views+sizeof(world),&bounds,sizeof(bounds));
-    size_t view_size=bounds.valid?sizeof(views):sizeof(world);
+    size_t view_size=(bounds.valid || bounds.camera_valid)?sizeof(views):sizeof(world);
     if(!SnesReplayWriterFrame(writer,(unsigned)snes_frame_counter,g_ram,0x20000,
         &coop,sizeof(coop),&views,view_size,g_ppu->vram,sizeof(g_ppu->vram)))
       error(SnesReplayWriterError(writer));
