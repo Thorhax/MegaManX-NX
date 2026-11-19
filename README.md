@@ -20,6 +20,7 @@ The launcher, mods, password saves, save states and rewind all come with it.
 - **Playable Zero** (X3, Modern or **Saber Zero** behavior), **X / Zero co-op**, and the **X2 / X3 boss weapons**, using your own X2/X3 ROMs.
 - **X2 / X3 armor** (experimental): X wears the donor game's armor. X1's capsules unlock the matching parts, and the Hadouken capsule adds X3's Gold Armor.
 - **Player 2 Learner Mode** for co-op: Player 2 can't lose health or die, and the camera follows Player 1.
+- **Damage multipliers**: scale X's damage dealt and the damage the player takes, independently.
 - **Boss Rush**: an endless two-at-a-time Maverick gauntlet with a high score, picked from the title menu.
 - **The full launcher** on the console: Mods, Controls and Settings. It works with a controller or the touchscreen, and has a built-in SD-card file browser.
 - **Password saves**, a **save-state browser** and **rewind**.

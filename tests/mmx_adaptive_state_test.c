@@ -1679,6 +1679,7 @@ static void zero_charge_visual_checks(const char *fixture,uint8 *start,uint8 *ex
 #include "mmx_weapon_parasitic_test.inc"
 #include "mmx_weapon_stage_test.inc"
 #include "mmx_weapon_weakness_test.inc"
+#include "mmx_damage_runtime_test.inc"
 static void zero_state_checks(const char *assets, const char *fixture, uint8 *start,
                               uint8 *expected, uint8 *actual, size_t cap) {
   check(fixture != NULL && MmxZeroLoad(assets), "Zero local assets load");
@@ -1953,6 +1954,17 @@ int main(int argc, char **argv) {
     g_mmx_custom_aspect = MMX_ASPECT_ADAPTIVE;
   }
   g_config.display_aspect = kSnesDisplayAspect_Crt4x3;
+  check(MmxWindowWidth(256) == 427, "legacy adaptive Auto starts with a wide canvas");
+  check(MmxWindowWidth(256) == 320, "later native-width sizing keeps the selected geometry");
+  s_initial_window_width = true; g_config.widescreen = false;
+  check(MmxWindowWidth(256) == 320, "saved native choice keeps native startup sizing");
+  s_initial_window_width = true; g_config.widescreen = true;
+  g_config.window_width = 800; g_config.window_height = 600;
+  check(MmxWindowWidth(256) == 320, "saved custom window bypasses adaptive startup seeding");
+  g_config.window_width = g_config.window_height = 0;
+  s_initial_window_width = true; g_mmx_custom_aspect = MMX_ASPECT_16_9;
+  check(MmxWindowWidth(256) == 320, "saved fixed aspect keeps its startup sizing policy");
+  g_mmx_custom_aspect = MMX_ASPECT_ADAPTIVE; s_initial_window_width = true;
   check(FindCmdForSdlKey(SDLK_F7, 0) == kKeys_SaveStateMenu &&
         FindCmdForSdlKey(SDLK_F8, 0) == kKeys_Rewind &&
         FindCmdForSdlKey(SDLK_F11, 0) == kKeys_Load + 6 &&
@@ -1989,6 +2001,7 @@ int main(int argc, char **argv) {
   check(SnesInit(rom, rom_size) != NULL, "game initializes");
   g_spc_player = SmwSpcPlayer_Create();
   g_spc_player->initialize(g_spc_player);
+  if (getenv("MMX_DAMAGE_TEST")) { damage_runtime_checks(argv[1]); return 0; }
   if (getenv("MMX_WEAKNESS_TEST")) {
     weapon_weakness_checks();
     return 0;

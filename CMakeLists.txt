@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(MegaManXSNESRecomp VERSION 2.3.12 LANGUAGES C CXX)
+project(MegaManXSNESRecomp VERSION 2.3.13 LANGUAGES C CXX)
 # Qualified Windows x64 default; retain explicit selections and other-target floors.
 set(_MMX_RASTER_IMPL_DEFAULT "LLE")
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _MMX_RASTER_IMPL_PROCESSOR)
@@ -21,6 +21,11 @@ set_property(SOURCE src/main.c src/mmx_rtl.c tests/mmx_adaptive_state_test.c
     APPEND PROPERTY COMPILE_DEFINITIONS
     MMX_NATIVE_RASTER=$<STREQUAL:${MMX_RASTER_IMPL},NATIVE>)
 set(CMAKE_C_STANDARD 11)
+if(ANDROID)
+    include(android/dependencies.cmake)
+    set(SNESRECOMP_SDL_BACKEND SDL2 CACHE STRING "" FORCE)
+    set(SNESRECOMP_HD_GPU OFF CACHE BOOL "" FORCE)
+endif()
 set(SNESRECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/snesrecomp" CACHE PATH "snesrecomp checkout")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_package(Git QUIET)
@@ -41,7 +46,16 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/mmx_weapon_sources.h"
         "${CMAKE_CURRENT_BINARY_DIR}/mmx_weapon_sources.h"
     DEPENDS tools/generate_x_weapon_tables.py tools/data/x_weapon_assets.json VERBATIM)
 
-set(SNESRECOMP_BUILD_VERSION "${PROJECT_VERSION}" CACHE STRING "Release stamp for crash reports")
+if(ANDROID)
+    set(_MMX_BUILD_VERSION "${PROJECT_VERSION}-android.1")
+else()
+    set(_MMX_BUILD_VERSION "${PROJECT_VERSION}")
+endif()
+if(ANDROID)
+    set(SNESRECOMP_BUILD_VERSION "${_MMX_BUILD_VERSION}" CACHE STRING "Release stamp for crash reports" FORCE)
+else()
+    set(SNESRECOMP_BUILD_VERSION "${_MMX_BUILD_VERSION}" CACHE STRING "Release stamp for crash reports")
+endif()
 set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH "recomp-ui checkout")
 option(MMX_RASTER_FULL_COPY "Use full-copy raster storage as the correctness/performance reference" OFF)
 option(MMX_STAGE_TILE_REUSE "Reuse exact stage-map lookups within one captured draw" ON)
@@ -50,7 +64,9 @@ if(_MMX_RASTER_IMPL_DEFAULT STREQUAL "NATIVE" AND MMX_RASTER_IMPL STREQUAL "NATI
     set(_MMX_NATIVE_ROW_PLAN_DEFAULT ON)
 endif()
 option(MMX_NATIVE_ROW_PLAN "Prepare whole-view native row composition plans" ${_MMX_NATIVE_ROW_PLAN_DEFAULT})
-option(MMX_NATIVE_BG_SPANS "Bind reconstructed background tiles and palettes per source span" OFF)
+# Match the qualified native row-plan default; preserve explicit cache choices
+# and the portable/reference defaults on other configurations.
+option(MMX_NATIVE_BG_SPANS "Bind reconstructed background tiles and palettes per source span" ${_MMX_NATIVE_ROW_PLAN_DEFAULT})
 set_property(SOURCE src/mmx_renderer_native.c tests/mmx_native_renderer_test.c
     src/main.c tests/mmx_adaptive_state_test.c
     APPEND PROPERTY COMPILE_DEFINITIONS
@@ -73,7 +89,9 @@ include(${SNESRECOMP_ROOT}/runner/runner.cmake)
 string(APPEND MMX_REPLAY_ENGINE "-apu${SNESRECOMP_APU_TIME_IMPL}-crc${SNESRECOMP_CRC32_IMPL}-raster${MMX_RASTER_IMPL}-row${MMX_NATIVE_ROW_PLAN}-bgspans${MMX_NATIVE_BG_SPANS}")
 set_property(SOURCE src/mmx_replay.c APPEND PROPERTY COMPILE_DEFINITIONS
     MMX_REPLAY_REVISION="${MMX_REPLAY_REVISION}" MMX_REPLAY_ENGINE="${MMX_REPLAY_ENGINE}")
-include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+if(NOT ANDROID)
+    include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+endif()
 if(NINTENDO_SWITCH)
     include(${CMAKE_CURRENT_SOURCE_DIR}/switch/switch.cmake)
 endif()
@@ -102,10 +120,20 @@ function(add_mmx_variant TARGET GEN_DIR CFG_DIR)
             return()
         endif()
     endif()
-    add_executable(${TARGET} ${SNESRECOMP_RUNNER_SOURCES}
+    if(ANDROID)
+        add_library(${TARGET} SHARED android/native.c)
+        set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME main)
+        target_link_libraries(${TARGET} PRIVATE log android GLESv2 EGL)
+        target_link_options(${TARGET} PRIVATE "-Wl,-z,max-page-size=16384")
+        target_compile_definitions(${TARGET} PRIVATE MMX_DESKTOP_ENTRY=SDL_main)
+    else()
+        add_executable(${TARGET})
+    endif()
+    target_sources(${TARGET} PRIVATE ${SNESRECOMP_RUNNER_SOURCES}
         src/main.c src/mmx_startup.c src/mmx_netplay.c src/mmx_display.c ${MMX_RENDERER_SOURCE} src/mmx_render_assets.c src/mmx_wide_policy.c
         src/mmx_00.c src/gen_stubs.c src/mmx_cpu_infra.c src/mmx_rtl.c
         src/mmx_spc_player.c src/mmx_replay.c src/mods/mmx_diagnostics_plugin.c
+        src/mmx_damage.c src/mods/mmx_damage_plugin.c
         src/mods/mmx_widescreen_plugin.c src/mods/mmx_msu1_plugin.c
         src/mods/mmx_hadouken_plugin.c src/mods/mmx_password_plugin.c src/mods/mmx_boss_rush_plugin.c src/mmx_password_save.cpp
         src/mods/mmx_zero_plugin.c src/mods/mmx_armor_plugin.c src/mmx_zero.c src/mmx_armor.c src/mmx_armor_launcher.c src/mmx_weapons.c src/mmx_weapon_combat.c src/mmx_knc_bugfix.c src/mmx_coop.c src/mmx_coop_trace.c src/mmx_coop_view.c
@@ -114,7 +142,7 @@ function(add_mmx_variant TARGET GEN_DIR CFG_DIR)
         src/mmx_source_assets.cpp "${CMAKE_CURRENT_BINARY_DIR}/mmx_weapon_sources.h")
     target_compile_features(${TARGET} PRIVATE cxx_std_17)
     target_include_directories(${TARGET} PRIVATE
-        ${CFG_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CFG_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src ${RECOMP_UI_ROOT}/src
         ${CMAKE_CURRENT_BINARY_DIR} ${SNESRECOMP_RUNNER_INCLUDE_DIRS})
     target_compile_definitions(${TARGET} PRIVATE
         SMW_DISABLE_LM=1 SYSTEM_VOLUME_MIXER_AVAILABLE=0
@@ -132,14 +160,18 @@ function(add_mmx_variant TARGET GEN_DIR CFG_DIR)
     if(SNESRECOMP_SETUP_HOST)
         target_sources(${TARGET} PRIVATE src/setup_host.c)
     endif()
-    snesrecomp_target_config_seed(${TARGET})
-    snesrecomp_target_shader_presets(${TARGET})
+    if(NOT ANDROID)
+        snesrecomp_target_config_seed(${TARGET})
+        snesrecomp_target_shader_presets(${TARGET})
+    endif()
     if("${TARGET}" STREQUAL "RockmanXSNESRecomp")
         # JP remains authentic 4:3, with no mod provider.
         snesrecomp_target_mod_catalog(${TARGET} NONE)
     else()
         snesrecomp_target_mod_catalog(${TARGET} "${CMAKE_CURRENT_SOURCE_DIR}/mods/preloaded")
-        snesrecomp_target_rom_cache(${TARGET})
+        if(NOT ANDROID)
+            snesrecomp_target_rom_cache(${TARGET})
+        endif()
         if(NOT SNESRECOMP_SETUP_HOST)
             # Invalidate generated objects before Ninja plans this build.
             file(GLOB mmx_generated ${GEN_DIR}/*.c)
@@ -148,6 +180,7 @@ function(add_mmx_variant TARGET GEN_DIR CFG_DIR)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_renderer_capture.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_password_hooks.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_zero_hooks.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_damage_hooks.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_coop_hooks.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_weapon_hooks.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_boss_rush_hooks.py)
@@ -166,6 +199,8 @@ function(add_mmx_variant TARGET GEN_DIR CFG_DIR)
                         --gen-dir ${GEN_DIR}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_boss_rush_hooks.py
                         --gen-dir ${GEN_DIR}
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/apply_damage_hooks.py
+                        --gen-dir ${GEN_DIR}
                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                 COMMENT "Applying Mega Man X generated-code mod hooks" VERBATIM)
             add_dependencies(${TARGET} ${TARGET}_widescreen_overrides)
@@ -183,9 +218,11 @@ function(add_mmx_variant TARGET GEN_DIR CFG_DIR)
         mmx_switch_target(${TARGET})
         return()
     endif()
-    recomp_target_launcher_ui(${TARGET} CONSOLE snes
-        BOXART ${CMAKE_CURRENT_SOURCE_DIR}/recomp/launcher/boxart.tga)
-    if(NOT "${TARGET}" STREQUAL "RockmanXSNESRecomp")
+    if(NOT ANDROID)
+        recomp_target_launcher_ui(${TARGET} CONSOLE snes
+            BOXART ${CMAKE_CURRENT_SOURCE_DIR}/recomp/launcher/boxart.tga)
+    endif()
+    if(NOT ANDROID AND NOT "${TARGET}" STREQUAL "RockmanXSNESRecomp")
         snesrecomp_enable_recomp_net(${TARGET})
     endif()
 endfunction()
@@ -196,12 +233,22 @@ set(MMX_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/gen" CACHE PATH
     "Generated USA program directory (allows isolated coverage comparisons)")
 add_mmx_variant(MegaManXSNESRecomp "${MMX_GEN_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/recomp")
+if(NOT ANDROID)
 add_mmx_variant(RockmanXSNESRecomp "${CMAKE_CURRENT_SOURCE_DIR}/variants/jp/gen"
     "${CMAKE_CURRENT_SOURCE_DIR}/variants/jp/config"
     MMX_VARIANT_JP=1 SNESRECOMP_LLE_BOUNCE_DEFAULT=0)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(mmx_damage_test tests/mmx_damage_test.c src/mmx_damage.c)
+    target_include_directories(mmx_damage_test PRIVATE src)
+    add_test(NAME mmx_damage_multipliers COMMAND mmx_damage_test)
+    if(MSVC)
+        target_compile_options(mmx_damage_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(mmx_damage_test PRIVATE -UNDEBUG)
+    endif()
     add_executable(mmx_armor_launcher_test tests/mmx_armor_launcher_test.c src/mmx_armor_launcher.c)
     target_include_directories(mmx_armor_launcher_test PRIVATE src ${RECOMP_UI_ROOT}/src)
     target_compile_definitions(mmx_armor_launcher_test PRIVATE RECOMP_LAUNCHER=1)
@@ -366,6 +413,15 @@ if(TARGET mmx_state_tests)
     set_property(TARGET mmx_state_tests PROPERTY SOURCES
         tests/mmx_adaptive_state_test.c ${mmx_state_sources})
     if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mmx.sfc")
+        set(damage_test_dir "${CMAKE_CURRENT_BINARY_DIR}/damage-runtime")
+        file(MAKE_DIRECTORY "${damage_test_dir}")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/mods/preloaded/" DESTINATION "${damage_test_dir}/catalog")
+        add_test(NAME mmx_damage_runtime
+            COMMAND ${CMAKE_COMMAND} -E env SDL_AUDIODRIVER=dummy SDL_VIDEODRIVER=dummy
+                MMX_REPLAY_RECORD=0 MMX_DAMAGE_TEST=1
+                $<TARGET_FILE:mmx_state_tests> "${CMAKE_CURRENT_SOURCE_DIR}/mmx.sfc")
+        set_tests_properties(mmx_damage_runtime PROPERTIES
+            WORKING_DIRECTORY "${damage_test_dir}" LABELS "rom;damage")
         set(rush_report_dir "${CMAKE_CURRENT_BINARY_DIR}/boss-rush-reports")
         set(render_rollback_dir "${CMAKE_CURRENT_BINARY_DIR}/render-rollback")
         file(MAKE_DIRECTORY "${render_rollback_dir}")

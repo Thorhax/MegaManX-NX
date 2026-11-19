@@ -23,6 +23,7 @@
 #include "mmx_default_config.h"
 #include "mmx_netplay.h"
 #include "mmx_startup.h"
+#include "mod_runtime.h"
 #include "mmx_coop_trace.h"
 #include "mmx_coop.h"
 #include "mmx_coop_view.h"
@@ -289,7 +290,23 @@ static void MmxViewport(int w, int h, int dw, int dh, SnesDisplayViewport *view)
   else MmxDisplay_ComputeViewport(w, h, dw, dh,
       SnesDisplayAspect_Clamp(g_config.display_aspect), g_config.ignore_aspect_ratio, false, view);
 }
+static bool s_initial_window_width = true;
+static bool MmxStartupAdaptiveEnabled(void) {
+#if SNESRECOMP_ENABLE_MODS
+  char aspect[16];
+  const char *package = "megaman-x.enhancement.widescreen";
+  /* The plan is committed before window creation; plugins activate later,
+   * after the machine exists. Query the admitted selection, not live flags. */
+  if (snes_mod_runtime_feature_option_value_c(package, "widescreen", "aspect",
+      aspect, sizeof(aspect)))
+    return snes_mod_runtime_feature_enabled_c(package, "widescreen") &&
+        !strcmp(aspect, "adaptive");
+#endif
+  return g_config.widescreen && g_mmx_custom_aspect == MMX_ASPECT_ADAPTIVE;
+}
 static int MmxWindowWidth(int w) {
+  bool initial = s_initial_window_width;
+  s_initial_window_width = false;
   if(MmxLocalSplit()) {
     double aspect=!g_config.widescreen ? 5.0/4 :
         g_mmx_custom_aspect==MMX_ASPECT_21_9 ? 21.0/9 :
@@ -297,6 +314,11 @@ static int MmxWindowWidth(int w) {
         g_mmx_custom_aspect==MMX_ASPECT_16_9 ? 16.0/9 : g_mmx_custom_view.aspect;
     return (int)(2*aspect*MmxDisplay_GetWindowBaseHeight()+.5);
   }
+  /* Adaptive starts with no field width until a window exists. Give a fresh
+   * Auto window a wide canvas; later resizes and saved choices stay authoritative. */
+  if (initial && !MMX_VARIANT_JP && !MmxNetplayActive() && w == 256 &&
+      !g_config.window_width && !g_config.window_height && MmxStartupAdaptiveEnabled())
+    return (int)(16.0 / 9 * MmxDisplay_GetWindowBaseHeight() + .5);
   return MmxDisplay_GetWindowBaseWidth(w, SnesDisplayAspect_Clamp(MmxNetplayActive() ? 0 : g_config.display_aspect));
 }
 
@@ -479,6 +501,10 @@ int MMX_DESKTOP_ENTRY(int argc, char **argv) {
   MmxArmorSetBusterQuery(MmxArmorBusterSelected);
   MmxArmorSetActorQuery(MmxCoopActorIsX);
   MmxArmorSetBodyQuery(MmxArmorBody);
+#ifdef __ANDROID__
+  extern void MmxAndroidPrepare(void);
+  MmxAndroidPrepare();
+#endif
   MmxStartupLogging();
   for(int arg=1;arg+1<argc;++arg)
     if(!strcmp(argv[arg],"--config")) MmxReplaySetConfigPath(argv[arg+1]);
